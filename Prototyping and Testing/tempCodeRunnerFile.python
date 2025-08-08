@@ -1,0 +1,94 @@
+import matplotlib.pyplot as plt
+import serial
+import time
+import csv
+import os
+
+# Dark mode style
+plt.style.use('dark_background')
+
+
+# This lists all available serial ports
+from serial.tools.list_ports import comports
+
+#print the port information
+print("Available serial ports:")
+for portItem in comports():
+    print(portItem)
+
+# Create a serial object
+serialArduino = serial.Serial('COM3', 115200, timeout=1)  # Adjust 'COM3', and Baudrate to your port
+
+# Wait for the serial connection to initialize 
+time.sleep(2)
+
+# Initialize lists to store data for plotting
+time_series = []
+angle_series = []
+
+# --- CREATE CSV FILE ---
+CSV_PATH = "C:/Users/Amine/Desktop/Project_Make_it_Or_Break_It/Prototyping and Testing/DATA_LOG/Test_1_74.csv"
+os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
+csv_file = open(CSV_PATH, mode='w', newline='')
+csv_writer = csv.writer(csv_file)
+csv_writer.writerow(["time_ms", "speed_pwm", "angle_raw", "angle_deg", "status", "angle_unwrapped", "motorstatus"])
+
+
+# Create live plot
+fig, ax = plt.subplots()
+plt.ion()  # Enable interactive mode
+plt.show()  # Show the plot window
+
+idx = 0 # Counts the number of data points
+
+n = 1 # Number of data points to collect before updating the plot
+
+try:
+    while True:
+
+        if serialArduino.in_waiting > 0:
+            # Read data from the serial port, it converts bytes to string and strips whitespace i.e newline characters and carriage returns
+            data_str = serialArduino.readline().decode('utf-8').strip() 
+
+            if data_str.startswith("time_ms"):  # skip CSV header from Arduino
+                continue
+            if "Total unwrapped angle" in data_str:
+                print("\nTest ended.")
+                break
+
+            try:
+                data_fields = data_str.split(',')
+                if len(data_fields) != 7:
+                    continue
+
+                # Write to CSV
+                csv_writer.writerow(data_fields)
+                csv_file.flush()  # Ensure data is written to the file immediately
+                # Parsing the data from the serial port to extract time and angle
+                time_ms = int(data_fields[0])  # The the first field is time in milliseconds
+                angle_unwrapped = float(data_fields[5])  # The second field is the angle in degrees
+                # Convert the string data to a float
+
+                # Append the data to the lists
+                time_series.append(time_ms)
+                angle_series.append(angle_unwrapped)
+                # Update the plot every n data points
+                if ((idx % n) == 0):
+                        
+                    ax.clear()  # Clear the previous plot
+                    ax.set_title('Encoder Data Live Plot')
+                    ax.set_xlabel('Time (ms)')
+                    ax.set_ylabel('Angle_Unwrapped (degrees)')
+                    ax.grid(True)
+                    ax.plot(time_series, angle_series, linestyle='-',linewidth=2, color='cyan', marker='o', markersize=5, markerfacecolor='yellow')  # Plot the data with a line and markers
+                    plt.pause(0.005)  # Pause to allow the plot to update and refresh
+                idx += 1
+            except:
+                pass
+
+except KeyboardInterrupt:
+    print("Exiting the live plot...")
+    serialArduino.close()  # Close the serial port
+    plt.close()
+        
+
