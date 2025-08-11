@@ -1,0 +1,112 @@
+import matplotlib.pyplot as plt
+import serial
+import time
+import csv
+import os
+import threading
+
+# Dark mode style
+plt.style.use('dark_background')
+
+
+# This lists all available serial ports
+from serial.tools.list_ports import comports
+
+#print the port information
+print("Available serial ports:")
+for portItem in comports():
+    print(portItem)
+
+# Create a serial object
+serialArduino = serial.Serial('COM3', 115200, timeout=1)  # Adjust 'COM3', and Baudrate to your port
+
+# Wait for the serial connection to initialize 
+time.sleep(2)
+
+# Start a background thread to send commands to Arduino
+def serial_input_thread():
+    while True:
+        user_input = input("Enter command (e.g. f,100): ")
+        serialArduino.write((user_input.strip() + '\n').encode())
+
+
+# Initialize lists to store data for 
+time_series = []
+setpoint_speed_series = []
+measured_speed_series = []
+
+# --- CREATE CSV FILE ---
+CSV_PATH = "C:/Users/Amine/Desktop/Project_Make_it_Or_Break_It/wheeled-robot-arm/Prototyping and Testing/DATA_LOG/PID_Test_2.csv"
+os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
+csv_file = open(CSV_PATH, mode='w', newline='')
+csv_writer = csv.writer(csv_file)
+csv_writer.writerow(["arduiono_Time", "setpoint", "measured", "error", "pwm", "delta"])
+
+
+# Create live plot
+fig, ax = plt.subplots()
+plt.ion()  # Enable interactive mode
+plt.show()  # Show the plot window
+
+idx = 0 # Counts the number of data points
+
+n = 1 # Number of data points to collect before updating the plot
+
+threading.Thread(target=serial_input_thread, daemon=True).start()  # Start the input thread
+try:
+    while True:
+
+        if serialArduino.in_waiting > 0:
+            # Read data from the serial port, it converts bytes to string and strips whitespace i.e newline characters and carriage returns
+            data_str = serialArduino.readline().decode('utf-8').strip() 
+
+            if data_str.startswith("time_ms"):  # skip CSV header from Arduino
+                continue
+            try:
+                data_fields = data_str.split('\t')
+                if len(data_fields) != 6:
+                    continue
+
+                t_sec = float(data_fields[0])
+                setpoint = float(data_fields[1])
+                measured = float(data_fields[2])
+                error = float(data_fields[3])
+                pwm = int(data_fields[4])
+                delta = float(data_fields[5])
+
+                # Write to CSV
+                csv_writer.writerow(data_fields)
+                csv_file.flush()  # Ensure data is written to the file immediately
+                # Parsing the data from the serial port to extract time, setpoint, and measured speed
+                arduino_time = float(data_fields[0])  #in seconds
+                setpoint_speed = float(data_fields[1])  # in deg/s
+                measured_speed = float(data_fields[2])  # in deg/s
+                # Convert the string data to a float
+
+                # Append the data to the lists
+                time_series.append(arduino_time)
+                measured_speed_series.append(measured_speed)
+                setpoint_speed_series.append(setpoint_speed)            # Update the plot every n data points
+                if ((idx % n) == 0):
+                        
+                    ax.clear()  # Clear the previous plot
+                    ax.set_title('PID Control - Measured Speed vs Setpoint Speed')
+                    ax.set_xlabel('Time (s)')
+                    ax.set_ylabel('Speed (deg/s)')
+
+                    ax.grid(True)
+
+                    ax.plot(time_series, measured_speed_series, label="Measured", color="cyan")
+                    ax.plot(time_series, setpoint_speed_series, label="Setpoint", color="yellow", linestyle="--")
+                    ax.legend(loc="upper left", fontsize=10, facecolor="black", edgecolor="white")
+                    plt.pause(0.001)  # Pause to allow the plot to update and refresh
+                idx += 1
+            except:
+                pass
+
+except KeyboardInterrupt:
+    print("Exiting the live plot...")
+    serialArduino.close()  # Close the serial port
+    plt.close()
+        
+

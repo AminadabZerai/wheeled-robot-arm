@@ -52,6 +52,11 @@ Thumbs.db
 venv/
 env/
 
+env/
+__pycache__/
+*.pyc
+
+
 
 build/
 install/
