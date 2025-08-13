@@ -55,9 +55,15 @@ const float tiny_error = 5.0; // Threshold for small error
 
 
 // PID Tuning Parameters (Change these to tune the PID controller)
-float kp = 0.6;
-float ki = 0.3;
-float kd = 0.003;
+/*
+These values are the best Tuning values for the PID parameters for the motor and encoder setup and were obtained through trial and error
+--> Kp = 0.64, Ki = 0.31, Kd = 0.072
+--> These values are tuned for a 7.4V motor and a 3.3V logic Arduino Nano 33 IoT
+ If you change the motor voltage or the Arduino logic voltage, you will need to retune the PID parameters
+ */
+float kp = 0.64;
+float ki = 0.31; // Changed from the best 0.34 as we are integrating Feedback Error (Fe) to the integral term
+float kd = 0.072;
 
 // Motor Setup Function Prototype
 void setMotor(char dir, int pwmVal);
@@ -139,7 +145,7 @@ void loop() {
     previousAngle = currentAngle;
 
 
-    // PID Control Logic
+    // PID Control Logic and LPF
     measured = -delta / dt;  // deg/s
     float alpha = 0.15;  // LPF smoothing factor
     static float filtered_measured = 0;

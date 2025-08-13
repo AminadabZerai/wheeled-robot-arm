@@ -36,7 +36,8 @@ setpoint_speed_series = []
 measured_speed_series = []
 
 # --- CREATE CSV FILE ---
-CSV_PATH = "C:/Users/Amine/Desktop/Project_Make_it_Or_Break_It/wheeled-robot-arm/Prototyping and Testing/DATA_LOG/PID_Test_2.csv"
+#Define the path for the CSV file
+CSV_PATH = "C:/Users/Amine/Desktop/Project_Make_it_Or_Break_It/wheeled-robot-arm/Prototyping and Testing/DATA_LOG/PID_Test_10.csv"
 os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
 csv_file = open(CSV_PATH, mode='w', newline='')
 csv_writer = csv.writer(csv_file)
