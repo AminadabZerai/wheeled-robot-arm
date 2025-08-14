@@ -57,13 +57,38 @@ const float tiny_error = 5.0; // Threshold for small error
 // PID Tuning Parameters (Change these to tune the PID controller)
 /*
 These values are the best Tuning values for the PID parameters for the motor and encoder setup and were obtained through trial and error
---> Kp = 0.64, Ki = 0.31, Kd = 0.072
+--> Kp = 0.64, Ki = 0.31, Kd = 0.0072
 --> These values are tuned for a 7.4V motor and a 3.3V logic Arduino Nano 33 IoT
  If you change the motor voltage or the Arduino logic voltage, you will need to retune the PID parameters
  */
 float kp = 0.64;
 float ki = 0.31; // Changed from the best 0.34 as we are integrating Feedback Error (Fe) to the integral term
-float kd = 0.072;
+float kd = 0.0078;
+
+
+// Feedforward Variables
+//-------------------------
+/*
+*These values are obtained from the PID tests where a CSV data was generated with the motor running at a constant speed when setpoints were given at a certain interval.
+*These values are used to estimate the PWM value needed to achieve a certain speed given by the setpoint.
+*Kv --> compensates backEMF and friction, which is proportional to the speed of the motor. It is the slope of the linear regression line that was fitted to the data points of the speed vs PWM values.
+*Ku -->  it's the offset/intercept of the linear regression line that was fitted to the data points of the speed vs PWM values.
+*/
+
+/* -------------------------------------------
+NB - These are tunable values and should be changed based on the motor and encoder setup you are using.
+
+float Kv_pos = 0.1625f, Ku_pos = 9.7f;
+float Kv_neg = 0.1608f, Ku_neg = 10.0f;
+Values obtained from the PID tests with the motor running at a constant speed when setpoints were given at a certain interval.
+Kp = 0.64, Ki = 0.34, Kd = 0.072
+----------------------------------------------*/
+
+float Kv_pos = 0.1588; // Feedforward gain for postive direction speed
+float Kv_neg = 0.1591; // Feedforward gain for negative direction speed
+float Ku_pos = 9.24; // Feedforward gain for control signal in positive direction 
+float Ku_neg = 8.88; // Feedforward gain for negative direction control signal
+
 
 // Motor Setup Function Prototype
 void setMotor(char dir, int pwmVal);
@@ -147,7 +172,7 @@ void loop() {
 
     // PID Control Logic and LPF
     measured = -delta / dt;  // deg/s
-    float alpha = 0.15;  // LPF smoothing factor
+    float alpha = 0.25;  // LPF smoothing factor
     static float filtered_measured = 0;
 
     filtered_measured = alpha * measured + (1 - alpha) * filtered_measured;
@@ -161,7 +186,14 @@ void loop() {
     //last_Error = error;
     last_measured = measured;
 
-  
+    // Reverse Bleed Management
+    // If the setpoint is in the opposite direction of the measured speed, reduce the integral term to prevent overshoot
+    // This is a simple anti-windup strategy to prevent integral windup when reversing direction  
+    bool reversing = (setpoint * measured < 0.0f);
+    bool near_zero = (fabs(measured) < 30.0f);
+    if (reversing && near_zero) integral *= 0.5;   // brief I bleed
+
+    
 
     if (isnan(delta) || isnan(currentAngle) || isnan(measured)) {
       setMotor('S', 0);  // S = stop both pins LOW
@@ -170,9 +202,21 @@ void loop() {
 
     float P = kp * error;  // Proportional term
     float I = ki * integral;  // Integral term
-    float D = kd * derivative;  // Derivative term   
+    float D = kd * derivative;  // Derivative term
+    
+    // Feedforward Control
+    float u_ff; // Feedforward control signal
+    if (setpoint > 0.0){
+      u_ff = Kv_pos * fabs(setpoint) + Ku_pos; // Feedforward for positive direction
+    }
+    else{
+      u_ff = -(Kv_neg * fabs(setpoint) + Ku_neg); // Feedforward for negative direction}
+    }
+    if (fabs(setpoint) < tiny_setpoint) {
+      u_ff = 0.0; // No feedforward for small setpoints
+    } 
 
-    float output = P + I + D;  // PID Control Signal
+    float output = P + I + D + u_ff;  // PID Control Signal along with Feedforward
 
     // Map control signal to PWM (0-255)
     int pwm_estimate = constrain((int)fabs(output), 0, 255); // Estimate PWM value before conditional integration check
@@ -186,7 +230,7 @@ void loop() {
     } 
     // Recompute with updated I
     I = ki * integral;
-    output = P + I + D;
+    output = P + I + D + u_ff;
 
     pwm = (int)fabs(output);  // Convert to PWM value
     pwm = constrain(pwm, 0, pwmMax);  // Ensure PWM is within valid range
