@@ -179,3 +179,116 @@ matlab/data/imu_data_2026-04-01_22-10-42.csv — Raw calibration capture
 - [ ] Implement on-board complementary filter (Arduino side)
 - [ ] Extract motor control into `MotorWheel` module
 - [ ] Extract PID into reusable `PID` module (per-motor instances)
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+## 2026-04-02 — I2C Multiplexing, Encoder Integrity & Hardware POST Implementation
+
+### Overview
+Three major threads today: (1) implemented a modular Power-On Self-Test (POST)
+framework for hardware safety validation; (2) resolved I2C address collisions using
+the TCA9548A multiplexer, including a critical bitmask bug; and (3) advanced the
+AS5600 encoder driver toward PID-ready telemetry. The robot now performs a "medical
+exam" before entering the control loop and has a clean, validated hardware backbone.
+
+---
+
+### Part 1: Hardware Integrity & POST (Power-On Self-Test)
+
+#### The Strategy: "Safety First" Bootloader
+
+To prevent mechanical runaway on startup, we implemented a modular `post.cpp`
+library. Before entering the main control loop, the robot performs a structured
+hardware health check — if any sensor reports a sub-optimal condition, the system
+enters an **SOS Blink** halt state with a specific diagnostic message rather than
+attempting to run.
+
+#### Key Implementations
+
+**Magnetic Field Validation**
+Created `post_as5600_health()` to monitor the Status register (`0x0B`) and the
+Automatic Gain Control register (`0x1A`). The system distinguishes between a missing
+magnet and an air-gap that is too wide, surfacing specific failure strings such as:
+`[FAIL] Enc Left-Front - NO MAGNET`.
+
+**Bus Presence Checks**
+Before any driver initialisation, the POST verifies both the IMU and MUX are
+acknowledging on the main I2C line.
+
+**POST Results Summary**
+
+| Component | Check | Threshold | Result |
+|-----------|-------|-----------|--------|
+| LSM6DS3 | WHO_AM_I | 0x69 | **PASS** |
+| TCA9548A | I2C Probe | Ack @ 0x70 | **PASS** |
+| AS5600 | Magnet Detected | MD Bit == 1 | **PASS** |
+| AS5600 | Signal Strength | AGC < 200 | **PASS** |
+
+---
+
+### Part 2: I2C Multiplexing & Communication Logic
+
+#### The Problem: Address Collision & "Ghost" Readings
+
+All four AS5600 encoders share a fixed I2C address (`0x36`). The TCA9548A
+multiplexer was introduced to isolate each encoder on its own channel. On first
+integration, all four channels returned `65535` (2¹⁶ − 1). This was identified as
+**"Floating High"** behaviour — the MCU was reading pull-up resistors because the
+MUX gate was not actually opening.
+
+#### The Fix: Bitmask Addressing
+
+The TCA9548A control register expects a **bitmask byte**, not a channel index.
+Writing a raw integer `0` disables all channels rather than selecting channel 0.
+
+- **Incorrect:** `Wire.write(0);` — disables all channels
+- **Correct:** `Wire.write(1 << MUX_CH_LF);` — opens only the target channel
+
+This single-line correction eliminated all ghost readings.
+
+---
+
+### Part 3: MATLAB Integration & Telemetry Issues
+
+#### Refactoring the Visualisation
+
+Updated the MATLAB live-stream script to a **3-subplot layout** (Accelerometer,
+Gyroscope, Encoder). The internal buffer was formalised to a strict **8-column
+schema**: `[Time, Acc_X, Acc_Y, Acc_Z, Gyr_X, Gyr_Y, Gyr_Z, Encoder_Angle]`.
+
+#### Current Blocker: Stream Stalling
+
+Despite the Arduino transmitting data, MATLAB is not rendering the live stream.
+
+**Root Cause (Suspected):** Data framing mismatch. The Arduino `loop()` was
+emitting `raw_angle` on a separate `println`, producing a 6-value line followed by
+a 1-value line. MATLAB's `readline()` sees an inconsistent column count and stalls.
+
+**Fix (Pending):** Consolidate all 7 sensor values into a single
+`Serial.print(...)` string terminated by one `\n`. This is the same principle as
+the CSV framing fix from yesterday's session — one sample, one line, always.
+
+---
+
+### Module Status Roadmap
+
+| Module | Files | Status |
+|--------|-------|--------|
+| POST / System Health | `lib/POST/post.cpp` | ✅ Functional |
+| IMU Driver | `lib/IMU/imu.cpp` | ✅ Stable |
+| AS5600 Driver | `lib/AS5600/as5600.cpp` | 🔄 Hardware Test OK |
+| MATLAB Tooling | `matlab/robot_live_stream.m` | ⚠️ Stalled (Framing Error) |
+
+---
+
+### Next Steps
+
+- [ ] **Finalise CSV Framing** — consolidate `Serial.print` in `main.cpp` to restore
+      MATLAB live plotting; one line per sample, 8 columns, single `\n` terminator
+- [ ] **Rollover Math** — implement 12-bit → 32-bit "infinite rotation" accumulation
+      logic in `as5600_update()` to handle multi-turn tracking without wrap-around jumps
+- [ ] **Angular Velocity** — derive rad/s from the encoder delta (Δangle / Δt) for
+      use as the PID D-term input
+- [ ] **Vibration Characterisation** — run IMU noise test with motors powered to
+      measure the real-world noise floor under load (flagged from yesterday)
