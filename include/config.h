@@ -8,11 +8,7 @@
 
 // --- Constants & Conversions ---
 const float RAW_TO_RAD = (2.0f * PI) / 4096.0f; 
-const float RAD_TO_DEG = 57.29577951f;
-
-// --- System Timing ---
-const unsigned long CONTROL_INTERVAL_MS = 20;
-const float DT = 0.020f; // Seconds
+// const float RAD_TO_DEG = 57.29577951f;  // Provided by Arduino
 
 // --- PID Gains (Initial Rad/s Estimates) ---
 struct ControlGains {
@@ -26,6 +22,21 @@ struct ControlGains {
 const int   PWM_MAX = 255;
 const int   PWM_MIN = 30;     
 const float VEL_MAX_RAD = 7.0f; // ~400 deg/s
+
+// --- Device Addresses ---
+const int AS5600_ADDR = 0x36;
+const int MUX_ADDR = 0x70;
+
+// -- Shared Registers ---
+#define AS5600_STATUS_REG 0x0B
+#define AS5600_GAIN_CONTROL_REG 0x1A
+
+
+// --- System Timing ---
+const float DT = 0.020f; // Seconds
+#define I2C_CLOCK     400000 // 400kHz Fast Mode
+#define I2C_CLOCK_STD 100000 // 100kHz Standard Mode
+#define CONTROL_INTERVAL_MS 20 // 50Hz
 
 // --- Hardware Pin Mapping ---
 // Left Front (LF)

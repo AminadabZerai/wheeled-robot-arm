@@ -87,11 +87,11 @@ monolithic "god-file" into a modular, component-based system.
 These noise density values become the Q/R covariance entries when implementing
 a Kalman or complementary filter:
 
-| Parameter | X | Y | Z | Unit |
-|-----------|---|---|---|------|
-| Accel noise density | 0.0001 | 0.0000 | 0.0001 | g/√Hz |
-| Gyro noise density | 0.0107 | 0.0096 | 0.0089 | (°/s)/√Hz |
-| Gyro bias | +0.005 | -0.006 | -0.010 | °/s |
+| Parameter           | X      | Y      | Z      | Unit      |
+|---------------------|--------|--------|--------|-----------|
+| Accel noise density | 0.0001 | 0.0000 | 0.0001 | g/√Hz     |
+| Gyro noise density  | 0.0107 | 0.0096 | 0.0089 | (°/s)/√Hz |
+| Gyro bias           | +0.005 | -0.006 | -0.010 | °/s |
 
 ---
 

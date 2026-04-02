@@ -15,7 +15,7 @@ fprintf('Data stream detected. Starting plot.\n');
 % 2. Visualization Setup
 fig = figure('Name', 'Robot IMU Live Stream', 'NumberTitle', 'off');
 
-subplot(2,1,1);
+subplot(3,1,1);
 hAccX = animatedline('Color', 'r', 'DisplayName', 'Acc X');
 hAccY = animatedline('Color', 'g', 'DisplayName', 'Acc Y');
 hAccZ = animatedline('Color', 'b', 'DisplayName', 'Acc Z');
@@ -26,10 +26,10 @@ ylabel('LSB');
 legend('show');
 grid on;
 
-subplot(2,1,2);
+subplot(3,1,2);
 hGyrX = animatedline('Color', 'm', 'DisplayName', 'Gyr X');
 hGyrY = animatedline('Color', 'c', 'DisplayName', 'Gyr Y');
-hGyrZ = animatedline('Color', 'k', 'DisplayName', 'Gyr Z');
+hGyrZ = animatedline('Color', 'w', 'DisplayName', 'Gyr Z');
 ax2 = gca;
 ax2.YLim = [-5000 5000];
 title('Gyroscope Data (Raw)');
@@ -38,14 +38,25 @@ xlabel('Samples');
 legend('show');
 grid on;
 
+subplot(3,1,3);
+encLF = animatedline('Color', 'y', 'DisplayName', 'LF Encoder');
+ax3 = gca;
+ax3.YLim = [0 5000];
+title('Encoder LF Data (Raw)');
+ylabel('LSB');
+xlabel('Samples');
+legend('show');
+grid on;
+
 % 3. Pre-allocate storage (grows if needed)
 bufferSize = 10000;
-allData = zeros(bufferSize, 7); % [timestamp, accX, accY, accZ, gyrX, gyrY, gyrZ]
+allData = zeros(bufferSize, 7); % [timestamp, accX, accY, accZ, gyrX, gyrY, gyrZ, encLF]
 
 % 4. Data Acquisition Loop
 i = 0;
 accMax = 20000;
 gyrMax = 5000;
+encLFMax = 5000;
 tic; % start timer for timestamps
 
 while isvalid(fig)
@@ -57,12 +68,12 @@ while isvalid(fig)
 
         dataVector = str2double(strsplit(rawLine, ','));
 
-        if length(dataVector) == 6 && ~any(isnan(dataVector))
+        if length(dataVector) == 7 && ~any(isnan(dataVector))
             i = i + 1;
 
             % Grow buffer if needed
             if i > size(allData, 1)
-                allData = [allData; zeros(bufferSize, 7)];
+                allData = [allData; zeros(bufferSize, 8)];
             end
 
             % Store with timestamp
@@ -77,9 +88,12 @@ while isvalid(fig)
             addpoints(hGyrY, i, dataVector(5));
             addpoints(hGyrZ, i, dataVector(6));
 
+            addpoints(encLF, i, dataVector(7));
+
             % Auto-scale
             peakAcc = max(abs(dataVector(1:3)));
             peakGyr = max(abs(dataVector(4:6)));
+            peakEncLF = max(abs(dataVector(7)));
             if peakAcc > accMax * 0.9
                 accMax = peakAcc * 1.5;
                 ax1.YLim = [-accMax accMax];
@@ -87,6 +101,10 @@ while isvalid(fig)
             if peakGyr > gyrMax * 0.9
                 gyrMax = peakGyr * 1.5;
                 ax2.YLim = [-gyrMax gyrMax];
+            end
+            if peakEncLF > encLFMax * 0.9
+                encLFMax = peakEncLF * 1.5;
+                ax2.YLim = [0 encLFMax];
             end
 
             if i > 200
@@ -108,9 +126,9 @@ clear device;
 allData = allData(1:i, :); % trim unused rows
 filename = sprintf('imu_data_%s.csv', datestr(now, 'yyyy-mm-dd_HH-MM-SS'));
 
-header = {'Time_s', 'AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ'};
+header = {'Time_s', 'AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ', 'EncLF'};
 fid = fopen(filename, 'w');
-fprintf(fid, '%s,%s,%s,%s,%s,%s,%s\n', header{:});
+fprintf(fid, '%s,%s,%s,%s,%s,%s,%s,%s\n', header{:});
 fclose(fid);
 
 dlmwrite(filename, allData, '-append', 'precision', '%.6f');
