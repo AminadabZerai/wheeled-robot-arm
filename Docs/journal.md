@@ -284,11 +284,11 @@ the CSV framing fix from yesterday's session — one sample, one line, always.
 
 ### Next Steps
 
-- [ ] **Finalise CSV Framing** — consolidate `Serial.print` in `main.cpp` to restore
+- [x] **Finalise CSV Framing** — consolidate `Serial.print` in `main.cpp` to restore
       MATLAB live plotting; one line per sample, 8 columns, single `\n` terminator
-- [ ] **Rollover Math** — implement 12-bit → 32-bit "infinite rotation" accumulation
+- [x] **Rollover Math** — implement 12-bit → 32-bit "infinite rotation" accumulation
       logic in `as5600_update()` to handle multi-turn tracking without wrap-around jumps
-- [ ] **Angular Velocity** — derive rad/s from the encoder delta (Δangle / Δt) for
+- [x] **Angular Velocity** — derive rad/s from the encoder delta (Δangle / Δt) for
       use as the PID D-term input
 - [ ] **Vibration Characterisation** — run IMU noise test with motors powered to
       measure the real-world noise floor under load (flagged from yesterday)
@@ -623,9 +623,6 @@ matlab/encoder_analysis.m                    — Encoder offline kinematic analy
 ```
 
 ### Next Steps
-
-- [ ] **Encoder characterisation session** — static noise floor baseline, then
-      velocity sweeps at fixed PWM steps to extract `σ_vx` and quantisation floor
 - [ ] **Add 3 remaining encoders** — replicate `enc_LF` pattern for RF, LR, RR;
       add mecanum forward kinematics block to `loop()` computing `vx`, `vy`, `ω`
 - [ ] **IMU vibration test under motor load** — characterise noise floor increase
@@ -634,5 +631,3 @@ matlab/encoder_analysis.m                    — Encoder offline kinematic analy
       following the same driver pattern as IMU and AS5600
 - [ ] **Implement `PID` module** — reentrant per-motor instances using the same
       struct pointer pattern as the sensor drivers
-- [ ] **Wheelbase and wheel radius calibration** — straight-line and rotation tests
-      to extract geometric parameters before EKF process model is written
