@@ -48,6 +48,7 @@ typedef struct {
 
     // Converted Physical Quantities
     float radians;  // Absolute postition for PID
+    float delta_radians; // Change in radians
     float angular_velocity; // rad/s calculated from raw data during DT
 
 } as5600_t;
@@ -58,7 +59,13 @@ typedef struct {
 void as5600_init(as5600_t *sensor, uint8_t mux_channel);
 
 // Data Acquisition
+void as5600_get_angle(as5600_t *sensor);
+void as5600_get_velocity(as5600_t *sensor);
 void as5600_update(as5600_t *sensor);
+
+
+#endif
+
 
 
 

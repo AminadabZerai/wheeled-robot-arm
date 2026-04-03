@@ -292,3 +292,347 @@ the CSV framing fix from yesterday's session — one sample, one line, always.
       use as the PID D-term input
 - [ ] **Vibration Characterisation** — run IMU noise test with motors powered to
       measure the real-world noise floor under load (flagged from yesterday)
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+## 2026-04-03 — AS5600 Encoder Driver Completion, Toolchain Debugging & MATLAB Telemetry Suite
+
+### Overview
+Three major threads today: (1) diagnosed and resolved a PlatformIO library identity
+conflict that was silently blocking the AS5600 driver from compiling; (2) completed
+the full encoder driver implementation — infinite rotation tracking, MUX gating,
+and velocity derivation — bringing the sensing layer to a synchronized, PID-ready
+state; (3) designed and delivered a fully separated MATLAB telemetry and analysis
+suite with four independent scripts covering IMU and encoder pipelines. The robot
+now streams 8 channels of calibrated sensor data at 100 Hz with graceful session
+management and clean CSV export.
+
+---
+
+### Part 1: PlatformIO Compilation Failure — Root Cause & Resolution
+
+#### The Problem: Library Identity Conflict
+
+On first build attempt, the compiler rejected every reference to `as5600_t` and
+`as5600_init()` with the following error:
+
+```
+src\main.cpp:14:1: error: 'as5600_t' does not name a type; did you mean 'AS5600L'?
+```
+
+The suggested alternative `AS5600L` was the diagnostic key — PlatformIO had located
+a community AS5600 library (robtillaart/AS5600) and was resolving all encoder
+symbols against it instead of the custom driver. The custom header was being
+silently ignored entirely.
+
+#### Root Causes Identified
+
+Two independent configuration errors in `platformio.ini` combined to produce the
+failure:
+
+**1. `lib_extra_dirs` exposed the entire Arduino library ecosystem**
+
+```ini
+lib_extra_dirs =
+    C:/Users/Amine/Documents/Arduino/libraries
+```
+
+This gave PlatformIO's dependency scanner access to every installed Arduino library,
+including the conflicting community AS5600 package.
+
+**2. `lib_ldf_mode = deep` enabled aggressive symbol resolution**
+
+With deep mode active, PlatformIO traverses all reachable directories looking for
+any file that can satisfy an unresolved symbol. Combined with `lib_extra_dirs`,
+this guaranteed the external library would be found and preferred over the local
+driver — no warning, no error, just the wrong library silently winning.
+
+#### The Fix
+
+Stripped `platformio.ini` to the minimum viable configuration:
+
+```ini
+[env:nano33iot]
+platform = atmelsam
+board = nano_33_iot
+framework = arduino
+monitor_speed = 115200
+
+build_flags =
+    -Iinclude
+```
+
+External dependencies are now declared explicitly via `lib_deps` only, preventing
+any implicit global library resolution. Build succeeded immediately on the next
+attempt.
+
+**Architectural Rule Established:** Never use `lib_extra_dirs` pointing to the
+Arduino global library folder. This couples the build environment to machine-local
+state and creates non-reproducible builds. Any dependency needed must appear in
+`lib_deps` by name and version.
+
+---
+
+### Part 2: AS5600 Driver — Implementation & Hardening
+
+#### A. The "Infinite Rotation" Engine — Rollover Math
+
+**The Challenge:** The AS5600 is a 12-bit absolute encoder — its raw output resets
+from 4095 back to 0 every 360°. A naive reading of this value would cause the PID
+controller to perceive a massive instantaneous jump during every wheel revolution,
+corrupting both the position error term and the derivative.
+
+**The Fix:** A shortest-path displacement algorithm operating on signed 16-bit
+arithmetic. Each control cycle computes the signed jump between the current and
+previous raw angle, then applies a boundary correction:
+
+```cpp
+int16_t jump = sensor->last_raw_angle - previous_raw_angle;
+if      (jump >  2048) jump -= 4096;  // Crossed 0-mark backwards
+else if (jump < -2048) jump += 4096;  // Crossed 0-mark forwards
+sensor->total_ticks += jump;
+sensor->radians = (float)sensor->total_ticks * RAW_TO_RAD;
+```
+
+This converts the 12-bit "face angle" into a 32-bit `total_ticks` accumulator,
+giving the robot an unbounded understanding of cumulative angular displacement.
+The `RAW_TO_RAD` constant (`2π / 4096`) converts ticks directly to radians.
+
+**Result:** The encoder now tracks infinite multi-turn rotation without sawtooth
+artifacts. The sign of `total_ticks` naturally encodes rotation direction, so no
+additional direction pin is required.
+
+#### B. MUX Gatekeeper — I2C Routing
+
+All four AS5600 encoders share a fixed I2C address (`0x36`). The TCA9548A
+multiplexer isolates each encoder on its own channel. The `select_mux_channel()`
+helper was finalized and encapsulated inside `read_regs()`, making channel
+selection completely transparent to `main.cpp`:
+
+```cpp
+static void select_mux_channel(uint8_t mux_channel) {
+    Wire.beginTransmission(MUX_ADDR);
+    Wire.write(1 << mux_channel);  // Bitmask, not index
+    Wire.endTransmission();
+}
+```
+
+The critical detail is the bitmask — a raw index of `0` disables all channels
+rather than selecting channel 0. This was the root cause of the "Ghost Readings"
+(`65535`) encountered in the previous session. The abstraction prevents this class
+of bug from ever surfacing in higher-level code.
+
+#### C. Physical Quantity Derivation — Velocity
+
+Velocity is derived by temporal differentiation of the radians field, synchronised
+to the control interval:
+
+```cpp
+void as5600_get_velocity(as5600_t *sensor) {
+    float prev_radians   = sensor->radians;
+    as5600_update(sensor);
+    float dt             = (float)CONTROL_INTERVAL_MS / 1000.0f;
+    sensor->delta_rad    = sensor->radians - prev_radians;
+    sensor->angular_velocity = sensor->delta_rad / dt;
+}
+```
+
+`delta_rad` was added as a first-class field on `as5600_t`. Logging the per-step
+displacement directly avoids downstream numerical differencing errors when replaying
+CSV data offline — particularly important for EKF process model tuning where
+floating-point accumulation errors in post-processing can distort Q matrix fits.
+
+Because velocity is derived from the signed `jump` logic, negative values are
+reported automatically for backward rotation with no additional direction logic.
+
+#### D. Code Hardening — Compiler Warnings Resolved
+
+Two warnings surfaced on the clean build and were addressed:
+
+**`buffer[]` may be used uninitialized** — In `as5600_get_angle()`, the read buffer
+was declared without initialisation. If `Wire.available()` returned false during
+a failed I2C transfer, the angle assembly would operate on garbage values. Fixed:
+
+```cpp
+uint8_t buffer[2] = {0, 0};
+```
+
+A failed read now produces a zero-delta in `total_ticks` rather than a random
+position jump — deterministic fault behaviour.
+
+**`write_reg` defined but not used** — Retained intentionally. This function will
+be used when the `AS5600_PREFERED_CONFIG` register write is implemented during
+POST initialisation (hysteresis, power mode, slow filter settings).
+
+**Final Memory Footprint After Full Integration**
+
+| Resource | Used | Available | Utilisation |
+|----------|------|-----------|-------------|
+| RAM | 4208 B | 32768 B | 12.8% |
+| Flash | 26344 B | 262144 B | 10.0% |
+
+Substantial headroom remains for motor control, PID instances, and the EKF state
+estimator.
+
+---
+
+### Part 3: MATLAB Telemetry Suite — Full Separation
+
+#### Architecture Decision: Four Independent Scripts
+
+The combined 8-channel stream format from the previous session was identified as
+an architectural problem for ongoing development:
+
+- IMU calibration sessions require the robot stationary — encoder data is noise
+- Encoder characterisation (slip tests, velocity sweeps) does not need IMU
+- Combined analysis scripts make filter tuning harder to isolate per sensor
+- Scaling to 4 encoders would make a combined format unmanageable
+
+The suite was therefore divided into four independent, self-contained scripts:
+
+| Script | Serial Columns | CSV Columns | Purpose |
+|--------|---------------|-------------|---------|
+| `imu_stream.m` | 6 | 7 | IMU live acquisition + export |
+| `encoder_stream.m` | 2 | 3 | Encoder live acquisition + export |
+| `imu_analysis.m` | — | 7 | Statistics, PSD, histograms, noise density |
+| `encoder_analysis.m` | — | 3 | Kinematics, rollover health, velocity noise |
+
+#### Graceful Stop — `try/finally` Pattern
+
+A recurring failure mode with live stream scripts is data loss on Ctrl+C, where
+execution never reaches the save block. The acquisition loop was wrapped in a
+`try/finally` block ensuring the CSV save always executes regardless of exit cause
+— figure close, Ctrl+C, or runtime error:
+
+```matlab
+finally
+    clear device;
+    if i > 0
+        % save CSV with timestamp filename
+    else
+        fprintf('No data collected — nothing saved.\n');
+    end
+end
+```
+
+The `i > 0` guard prevents writing an empty file if the session is aborted before
+any samples arrive.
+
+#### Encoder Analysis — Diagnostics Beyond the IMU Script
+
+Two encoder-specific diagnostics were added that have no IMU equivalent:
+
+**Rollover Health Check** — Diffs the `EncRad` column and flags any step exceeding
+`π` radians as a potential rollover artifact from `as5600_update()`. Zero detected
+jumps confirms the boundary correction logic is operating correctly end-to-end.
+
+**Dual Y-axis Velocity Plot** — Angular velocity is displayed simultaneously in
+rad/s (left axis) and RPM (right axis) using `yyaxis`, removing the need for
+mental unit conversion during test review sessions.
+
+---
+
+### Part 4: EKF Architecture — Mecanum Kinematic Implications
+
+A design review was held on encoder data requirements ahead of EKF implementation,
+with specific attention to how the mecanum drive geometry changes the architecture.
+
+#### Key Architectural Conclusions
+
+**Mecanum introduces a third independently controllable DOF.** Unlike differential
+drive where lateral velocity is zero by constraint, mecanum requires `vy` as a
+proper state:
+
+```
+State vector:  x = [px, py, θ, vx, vy, ω]
+```
+
+The dead reckoning update must apply the full 2D rotation matrix to transform
+body-frame velocities into world-frame displacements:
+
+```
+px_new = px + (vx·cosθ − vy·sinθ) · dt
+py_new = py + (vx·sinθ + vy·cosθ) · dt
+θ_new  = θ + ω · dt
+```
+
+**Forward kinematics mixing matrix** (standard 45° roller layout):
+
+```
+vx = ( v_LF + v_RF + v_LR + v_RR) × (r/4)
+vy = (-v_LF + v_RF + v_LR - v_RR) × (r/4)
+ω  = (-v_LF + v_RF - v_LR + v_RR) × (r / 4(Lx+Ly))
+```
+
+**Lateral slip dominates encoder uncertainty.** Mecanum rollers slip laterally by
+design — `σ_vy > σ_vx` is expected and must be characterised separately from
+forward noise. A multiplicative noise model is more appropriate than additive for
+the Q matrix:
+
+```
+σ_vy = k_y · |vy| + σ_0
+```
+
+Where `σ_0` is the quantisation floor from the static encoder test and `k_y` is
+fit from a dedicated strafe calibration run.
+
+**The IMU gyroscope is more valuable on mecanum than on differential drive.**
+Wheel slip corrupts encoder-derived `ω` directly. Fusing gyro `ω` with encoder `ω`
+in the EKF measurement update produces heading estimates that are robust to roller
+slip — an advantage that does not exist on differential drive where encoder
+odometry is inherently more reliable.
+
+#### Calibration Runs Required Before EKF Tuning
+
+| Test | Parameters Extracted |
+|------|---------------------|
+| Pure forward, fixed speeds | `r`, `σ_vx`, scale error |
+| Pure strafe, fixed speeds | Lateral slip coefficient, `σ_vy` |
+| Pure rotation in place | `Lx + Ly`, `σ_ω` |
+| Diagonal motion | Cross-coupling validation |
+| Surface comparison | Slip model per surface type |
+
+---
+
+### Module Status Roadmap
+
+| Module | Files | Status |
+|--------|-------|--------|
+| POST / System Health | `lib/POST/post.cpp` | ✅ Stable |
+| IMU Driver | `lib/IMU/imu.cpp` | ✅ Stable |
+| AS5600 Encoder Driver | `lib/AS5600/as5600.cpp` | ✅ Complete — streaming live |
+| MATLAB IMU Stream | `matlab/imu_stream.m` | ✅ Complete |
+| MATLAB Encoder Stream | `matlab/encoder_stream.m` | ✅ Complete |
+| MATLAB IMU Analysis | `matlab/imu_analysis.m` | ✅ Complete |
+| MATLAB Encoder Analysis | `matlab/encoder_analysis.m` | ✅ Complete |
+| Motor Control | `lib/MotorWheel/` | 📋 Planned |
+| PID Controller | `lib/PID/` | 📋 Planned |
+| Move Base / EKF | `lib/MoveBase/` | 📋 Planned |
+
+---
+
+### Files Added This Session
+
+```
+lib/AS5600/as5600.cpp                        — Encoder driver (complete)
+lib/AS5600/as5600.h                          — Driver header with as5600_t struct
+matlab/imu_stream.m                          — IMU-only live stream + CSV export
+matlab/encoder_stream.m                      — Encoder-only live stream + CSV export
+matlab/imu_analysis.m                        — IMU offline statistical analysis
+matlab/encoder_analysis.m                    — Encoder offline kinematic analysis
+```
+
+### Next Steps
+
+- [ ] **Encoder characterisation session** — static noise floor baseline, then
+      velocity sweeps at fixed PWM steps to extract `σ_vx` and quantisation floor
+- [ ] **Add 3 remaining encoders** — replicate `enc_LF` pattern for RF, LR, RR;
+      add mecanum forward kinematics block to `loop()` computing `vx`, `vy`, `ω`
+- [ ] **IMU vibration test under motor load** — characterise noise floor increase
+      relative to the 2026-04-01 stationary baseline
+- [ ] **Implement `MotorWheel` module** — extract motor control from `main.cpp`
+      following the same driver pattern as IMU and AS5600
+- [ ] **Implement `PID` module** — reentrant per-motor instances using the same
+      struct pointer pattern as the sensor drivers
+- [ ] **Wheelbase and wheel radius calibration** — straight-line and rotation tests
+      to extract geometric parameters before EKF process model is written

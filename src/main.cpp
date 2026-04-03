@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include "imu.h"
 #include "as5600.h"
+#include "imu.h"
 #include "config.h"
 #include "post.h"
 
@@ -11,6 +11,7 @@ unsigned long last_print_time = 0;
 
 // Structures
 lsm6ds3_t imu;
+as5600_t enc_LF;
 sensor_data_t gyro_data;
 sensor_data_t accel_data;
 
@@ -27,8 +28,9 @@ void setup() {
   bool health = check_i2c();
   post_system_report(health); // Halts here if a wire is loose
 
-  // Step 2: Initialize IMU Object
+  // Step 2: Initialize IMU Object and Encoder Object
   lsm6ds3_init(&imu, LSM6DS3_ADDR);
+  as5600_init(&enc_LF, MUX_CH_LF);
 
   // Step 3: Authenticate (Verify it's actually an LSM6DS3)
   if (!lsm6ds3_check_id(&imu)) {
@@ -65,20 +67,8 @@ void loop() {
     lsm6ds3_read_accel(&imu, &accel_data);
     lsm6ds3_read_gyro(&imu, &gyro_data);
 
-    // Testing the encoder on Left-Front
-    Wire.beginTransmission(MUX_ADDR); // Start transmission to MUX address
-    Wire.write(1 << MUX_CH_LF);; // Send channel number to MUX, 0 = Left-Front
-    Wire.endTransmission();
-
-    Wire.beginTransmission(AS5600_ADDR);
-    Wire.write(0x0C);
-    Wire.endTransmission();
-    Wire.requestFrom(AS5600_ADDR, 2);
-
-    uint16_t raw_angle = 0;
-    if (Wire.available() >= 2) {
-      raw_angle = (Wire.read() << 8) | Wire.read();
-    }
+    //Update Encoder (updates total_ticks, radians, and velocity)
+    as5600_get_velocity(&enc_LF);
 
 
 
@@ -89,6 +79,7 @@ void loop() {
     Serial.print(gyro_data.x);Serial.print(",");
     Serial.print(gyro_data.y);Serial.print(",");
     Serial.print(gyro_data.z);Serial.print(",");
-    Serial.println(raw_angle);
+    Serial.print(enc_LF.radians);Serial.print(",");
+    Serial.println(enc_LF.angular_velocity);
   } 
 }
