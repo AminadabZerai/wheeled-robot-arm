@@ -39,6 +39,9 @@ const float DT = 0.020f; // Seconds
 #define CONTROL_INTERVAL_MS 20 // 50Hz
 
 // --- Hardware Pin Mapping ---
+
+// Commmon Standby Pins for motors
+#define PIN_STANDBY 21
 // Left Front (LF)
 #define PIN_LF_PWM 2
 #define PIN_LF_IN1 4

@@ -627,7 +627,353 @@ matlab/encoder_analysis.m                    — Encoder offline kinematic analy
       add mecanum forward kinematics block to `loop()` computing `vx`, `vy`, `ω`
 - [ ] **IMU vibration test under motor load** — characterise noise floor increase
       relative to the 2026-04-01 stationary baseline
-- [ ] **Implement `MotorWheel` module** — extract motor control from `main.cpp`
+- [x] **Implement `MotorWheel` module** — extract motor control from `main.cpp`
       following the same driver pattern as IMU and AS5600
 - [ ] **Implement `PID` module** — reentrant per-motor instances using the same
       struct pointer pattern as the sensor drivers
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+## 2026-04-04 — Motor Driver Module & Open-Loop System Identification
+
+### Overview
+Two major threads today: (1) implemented the `Motor` driver module following the
+same component-based architecture established for the IMU and encoder drivers;
+(2) designed and executed a structured open-loop characterisation session using a
+new MATLAB test suite, extracting the key physical parameters of the motor-encoder
+system needed to make an informed first attempt at PID tuning tomorrow.
+
+---
+
+### Part 1: Motor Driver Module
+
+#### Architecture
+
+The motor driver follows the same pattern as the IMU and encoder modules — a
+struct holds all hardware state, and a set of functions operate on a pointer to
+that struct. This makes the driver reentrant: declaring `motor_t motor_LF` and
+`motor_t motor_RF` and calling the same functions on each is all that is needed
+to support four independent motors without duplicating any logic.
+
+```c
+typedef struct {
+    uint8_t motor_pwm_pin;
+    uint8_t motor_pin1;
+    uint8_t motor_pin2;
+    uint8_t motor_enable_pin;
+    float   current_power;   // -100.0 to +100.0
+    bool    is_inverted;     // software direction flip if wired backwards
+} motor_t;
+```
+
+#### Key Implementation Details
+
+**Power representation** uses a -100.0 to +100.0 percentage scale rather than
+raw PWM (0–255). This decouples the control logic from the hardware, making the
+PID output human-readable and portable if the MCU or driver chip ever changes.
+The conversion to PWM happens only at the lowest level inside `motor_set_speed()`:
+
+```cpp
+uint8_t pwm = (uint8_t)map(fabs(power), 0.0f, 100.0f, 0, 255);
+```
+
+**Direction control** is handled by the TB6612FNG H-bridge logic. IN1/IN2 set
+the direction, PWM sets the magnitude, and the STANDBY pin enables or disables
+the entire driver chip. The four operating states are:
+
+| IN1 | IN2 | PWM | Behaviour |
+|-----|-----|-----|-----------|
+| HIGH | LOW | >0 | Forward |
+| LOW | HIGH | >0 | Reverse |
+| LOW | LOW | any | Coast (free spin) |
+| HIGH | HIGH | 255 | Brake (short circuit) |
+
+**Braking** applies full PWM with both IN pins HIGH, creating a short-circuit
+across the motor terminals that generates maximum resistive braking torque.
+This is used for emergency stops, not normal deceleration.
+
+**`is_inverted` flag** is reserved for the case where a motor is physically wired
+backwards on the robot chassis. Setting this flag in software flips the direction
+without rewiring — important when all four mecanum wheels are mounted and some
+face opposite directions.
+
+#### Non-Blocking Serial Command Interface
+
+A key change to `main.cpp` was replacing `Serial.parseFloat()` with a
+character-by-character accumulation buffer:
+
+```cpp
+String serial_buffer = "";
+
+while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+        if (serial_buffer.length() > 0) {
+            float commanded_power = serial_buffer.toFloat();
+            motor_set_speed(&motor_LF, commanded_power);
+        }
+        serial_buffer = "";
+    } else {
+        serial_buffer += c;
+    }
+}
+```
+
+`parseFloat()` blocks the entire loop for up to the Serial timeout period while
+waiting for more digits. During that blocking window, the encoder cannot be read
+and no data is streamed. The buffer approach reads one character at a time, acts
+only when a newline arrives, and never stalls the control loop. The `length() > 0`
+guard prevents a bare newline from triggering a `toFloat()` call that returns 0.0
+and silently stops the motor.
+
+---
+
+### Part 2: Open-Loop System Identification — What We Did and Why
+
+Before implementing a PID controller, we need to understand how the physical
+system behaves. This section explains the MATLAB test suite in plain terms and
+documents what each result means.
+
+#### The Core Question: What Are We Trying to Learn?
+
+A PID controller works by computing an error (the difference between where the
+wheel is and where we want it to be) and converting that error into a motor power
+command. But to choose the right PID gains, we first need to know three things:
+
+1. **What is the minimum power to make the wheel move at all?** — Deadband
+2. **How fast does the wheel spin at each power level?** — Plant Gain K
+3. **How quickly does the wheel reach its target speed?** — Time Constant τ
+
+The MATLAB script answers all three automatically by commanding the motor and
+reading the encoder response.
+
+#### How the MATLAB-Arduino Communication Works
+
+MATLAB acts as the test controller. Arduino acts as the executor and reporter.
+They talk over the USB serial cable:
+
+```
+MATLAB sends:   "40.00\n"
+Arduino reads:  serial_buffer = "40.00" → motor_set_speed(40.0) → wheel spins
+
+Arduino sends:  "12345,40.00,1.234567,8.910000\n"
+                [Time_ms, Power_pct, Angle_rad, Vel_rads]
+MATLAB reads:   stores the 4 numbers in a growing data matrix
+```
+
+MATLAB stores every line in a buffer, then analyses the numbers after each
+segment ends. The motor never needs to be reprogrammed between tests — MATLAB
+drives everything dynamically over serial.
+
+#### Test 1: Deadband Identification — "What is the Minimum Effective Power?"
+
+**The concept:** A motor with a gearbox does not move the moment you apply any
+power. There is a threshold below which friction in the gearbox exceeds the
+motor's torque output. Below this threshold, the motor hums but the wheel stays
+still. This threshold is the *deadband*.
+
+**What the test does:** MATLAB commands power levels from 5% to 60% in steps of
+5%, holding each for 2.5 seconds. Before each step it stops the motor and flushes
+the serial buffer to prevent stale readings contaminating the new segment. After
+each segment it computes the mean absolute velocity. When this mean exceeds a
+noise threshold of 0.05 rad/s, the wheel has started moving — that power level
+is the deadband.
+
+**Why this matters for PID:** If a PID controller outputs 15% power and the
+deadband is 30%, the motor does nothing. The integrator keeps accumulating error,
+the output keeps climbing, and when the wheel finally breaks free it lurches
+violently. Knowing the deadband lets us clamp the PID output to never command
+below it when motion is intended.
+
+**Result: Deadband = 30%**
+
+The wheel produced no meaningful motion below 30%. At 30% and above, velocity
+rose cleanly and monotonically. This is a relatively high deadband, typical of
+brushed DC motors with plastic gearboxes.
+
+#### Test 2: PWM-to-Velocity Map — "How Fast Does the Wheel Spin per Unit of Power?"
+
+**The concept:** Once above the deadband, there is a relationship between how
+much power we command and how fast the wheel spins at steady state. If this
+relationship is approximately linear, we can describe it with a single number
+called the *plant gain K*.
+
+**What the test does:** MATLAB commands fixed power levels from ±30% to ±100%,
+holding each for 3 seconds. For each level, it discards the first 1500ms (the
+acceleration transient) and computes the mean velocity from the remaining
+steady-state tail. It then fits a straight line through all the (power, velocity)
+pairs. The slope of that line is K.
+
+**The linear model:**
+
+```
+velocity (rad/s) = K × power (%)
+K = 0.2291 (rad/s) per % power
+```
+
+This means for every 1% of power above the deadband, the wheel gains
+approximately 0.23 rad/s. At 100% power the wheel reaches ~23 rad/s
+(approximately 220 RPM).
+
+**Forward vs Reverse symmetry:**
+
+| Direction | Velocity at 100% |
+|-----------|-----------------|
+| Forward | 23.02 rad/s |
+| Reverse | 23.95 rad/s |
+
+Only 4% asymmetry — excellent for a brushed motor. Separate PID gains per
+direction are not needed.
+
+**Why K matters for PID:** K tells us how sensitive the system is to our
+commands. The mathematical starting point for Kp is simply `1/K` — if the system
+is less sensitive (small K) we need a larger proportional gain to make up for it.
+
+**Result: K = 0.2291 → suggests Kp ~ 4.37**
+
+#### Test 3: Step Response — "How Quickly Does the Wheel Respond?"
+
+**The concept:** When we suddenly apply a fixed power command, the wheel does not
+instantly reach its target speed. It accelerates over a period of time, limited
+by the motor's inertia and back-EMF. The characteristic time of this rise is the
+*time constant τ*.
+
+**What the test does:** MATLAB commands a sudden jump from 0% to a fixed power
+level (40%, 60%, 100%) and records the encoder velocity every 10ms for 4 seconds.
+
+**What τ means:** τ is defined as the time for the velocity to reach 63.2% of
+its final steady-state value. This comes from the mathematics of first-order
+systems — a motor-gearbox behaves approximately like:
+
+```
+velocity(t) = v_steady × (1 − e^(−t/τ))
+At t = τ:  velocity = v_steady × 0.632
+```
+
+In the MATLAB code this is found by scanning the velocity array for the first
+sample that crosses the 63.2% mark:
+
+```matlab
+v_ss    = mean(vel(end-10:end));         % steady-state from last 10 samples
+tau_idx = find(vel >= 0.632 * v_ss, 1); % first crossing of 63.2%
+tau     = t_rel(tau_idx);               % elapsed time at that index
+```
+
+**Why τ matters for PID:**
+- A small τ means the motor responds quickly
+- Ki eliminates steady-state error and should operate on the timescale of τ: `Ki = Kp / τ`
+- Kd adds damping proportional to the rate of change: `Kd = Kp × τ × 0.1`
+
+**Result: τ = 0.10 s**
+
+The wheel reaches 63.2% of its steady-state speed in 100ms. With a 10ms control
+interval, the PID loop completes 10 cycles within one time constant — more than
+sufficient resolution for stable control.
+
+#### Computed PID Starting Points
+
+| Parameter | Formula | Value |
+|-----------|---------|-------|
+| Kp | 1 / K | 4.37 |
+| Ki | Kp / τ | 43.66 |
+| Kd | Kp × τ × 0.1 | 0.044 |
+
+These are mathematically derived starting points, not final values. For
+tomorrow's tuning session, we start conservatively:
+
+```
+Kp = 2.0   — half the computed value to avoid overshoot on first run
+Ki = 0.0   — add only after Kp is stable
+Kd = 0.0   — add last if oscillation appears
+```
+
+**Tuning sequence for tomorrow:**
+1. Increase Kp until the wheel tracks a setpoint with acceptable overshoot
+2. Add Ki to eliminate the steady-state error that persists when Kp alone is used
+3. Add Kd only if the response oscillates or overshoots significantly
+
+#### The Feedforward Insight
+
+Because the deadband is large (30%), a purely reactive PID controller will
+struggle at low speeds — the integrator winds up trying to overcome the deadband,
+causing a lurch when the motor finally breaks free. A better approach adds a
+*feedforward* term that maps the desired velocity directly to a base power level:
+
+```
+output = deadband_pct + (desired_velocity / K)
+PID corrects only the residual error on top of this baseline
+```
+
+This will be implemented as part of the PID module.
+
+---
+
+### Troubleshooting Log — Serial Communication Bugs
+
+Three separate bugs were encountered and resolved during the MATLAB integration:
+
+| Bug | Symptom | Root Cause | Fix |
+|-----|---------|------------|-----|
+| `parseFloat()` blocking | Motor unresponsive during sweep | parseFloat blocks loop for full timeout | Non-blocking char buffer |
+| Double newline | Motor stops instantly after command | `writeline` + `\n` in sprintf = two newlines | Remove `\n` from sprintf |
+| Second `flush()` eating data | All velocities read as 0.0 | flush after command discarded real measurements | Remove post-command flush |
+
+These bugs reinforced a key principle: **serial timing bugs are invisible.**
+The motor was visibly spinning during most of these failures, which made them
+harder to identify. The fix was to treat the serial protocol as a strict contract:
+one side sends, the other receives, and nothing flushes the pipe while data is
+expected.
+
+---
+
+### Module Status Roadmap
+
+| Module | Files | Status |
+|--------|-------|--------|
+| POST / System Health | `lib/POST/post.cpp` | ✅ Stable |
+| IMU Driver | `lib/IMU/imu.cpp` | ✅ Stable |
+| AS5600 Encoder Driver | `lib/AS5600/as5600.cpp` | ✅ Stable |
+| Motor Driver | `lib/Motor/motor.cpp` | ✅ Complete |
+| MATLAB Open-Loop Suite | `matlab/motor_openloop_test.m` | ✅ Complete |
+| PID Controller | `lib/PID/` | 🔄 Next — parameters ready |
+| Move Base / EKF | `lib/MoveBase/` | 📋 Planned |
+
+---
+
+### Files Added This Session
+
+```
+lib/Motor/motor.cpp                           — Motor driver implementation
+lib/Motor/motor.h                             — Motor struct and function prototypes
+src/main.cpp                                  — Updated with non-blocking serial parser
+matlab/motor_openloop_test.m                  — Full open-loop characterisation suite
+matlab/CSVs/openloop_sweep_2026-04-04.csv     — Sweep results (power vs velocity)
+matlab/CSVs/openloop_step40_2026-04-04.csv   — Step response at 40%
+matlab/CSVs/openloop_step60_2026-04-04.csv   — Step response at 60%
+matlab/CSVs/openloop_step100_2026-04-04.csv  — Step response at 100%
+```
+
+### System Identification Results Summary
+
+| Parameter | Value | Unit |
+|-----------|-------|------|
+| Deadband | 30 | % power |
+| Plant gain K | 0.2291 | (rad/s)/% |
+| Max velocity | 23.95 | rad/s |
+| Time constant τ | 0.10 | s |
+| Fwd/Rev asymmetry | 4 | % |
+| Suggested Kp | 4.37 | — |
+| Suggested Ki | 43.66 | — |
+| Suggested Kd | 0.044 | — |
+
+### Next Steps
+
+- [ ] **Implement PID module** — reentrant `pid_t` struct with Kp, Ki, Kd,
+      integral accumulator, derivative filter, output clamping, and anti-windup
+- [ ] **Integrate feedforward** — map desired velocity to base power using K and
+      deadband offset; PID corrects residual error only
+- [ ] **Closed-loop step test** — command a velocity setpoint, record actual
+      velocity, tune gains until response is satisfactory
+- [ ] **Extend to 4 motors** — replicate motor_t for RF, LR, RR; add mecanum
+      forward kinematics to compute body vx, vy, ω
