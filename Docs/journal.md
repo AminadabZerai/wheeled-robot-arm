@@ -977,3 +977,325 @@ matlab/CSVs/openloop_step100_2026-04-04.csv  — Step response at 100%
       velocity, tune gains until response is satisfactory
 - [ ] **Extend to 4 motors** — replicate motor_t for RF, LR, RR; add mecanum
       forward kinematics to compute body vx, vy, ω
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+## 2026-04-05 — Plant Modelling, PID Auto-Tuning & Simulink Validation
+
+### Overview
+Before writing a single line of PID code, we took a step back and modelled the
+motor-encoder system mathematically, then used MATLAB's built-in `pidtune()`
+function to compute optimal gains automatically from that model. The gains were
+then validated inside a Simulink simulation to confirm the closed-loop behaviour
+before any hardware was touched. This session bridges the open-loop measurements
+from yesterday to the PID firmware implementation tomorrow.
+
+---
+
+### Part 1: What Is a Transfer Function and Why Do We Need One?
+
+#### The Problem With Guessing PID Gains
+
+A PID controller has three knobs: Kp, Ki, and Kd. If you turn them randomly, the
+wheel might overshoot wildly, oscillate forever, or respond too slowly to be
+useful. To choose them intelligently, you need a mathematical description of how
+the motor physically responds to a command. This description is called the
+**transfer function**.
+
+#### The Transfer Function G(s) — In Plain English
+
+Think of the transfer function as the motor's "personality profile." It answers
+the question: *if I send this power command, what velocity will I get, and how
+quickly?*
+
+For our motor, yesterday's open-loop tests revealed that it behaves like a
+**first-order system** — the simplest possible dynamic system. This means:
+
+- It has one source of "sluggishness" (mechanical inertia)
+- Its velocity rises smoothly toward a final value, never oscillating on its own
+- It is fully described by just two numbers: K and τ
+
+The transfer function is written as:
+
+```
+G(s) = K / (τs + 1)
+G(s) = 0.2291 / (0.1s + 1)
+```
+
+Where:
+- **K = 0.2291** is the plant gain — how many rad/s you get per % of power at
+  steady state
+- **τ = 0.1s** is the time constant — how quickly the motor reaches that speed
+- **s** is a mathematical operator (the Laplace variable) that represents
+  frequency; it allows us to analyse the system's behaviour across all speeds
+  of input change simultaneously, not just for one specific input
+
+In practical terms, this equation says: "apply 40% power, and after about 0.3
+seconds (3τ) the wheel will be spinning steadily at 40 × 0.2291 = 9.16 rad/s."
+Yesterday's measurement confirmed exactly this — the steady-state velocity at 40%
+was 8.95 rad/s, which matches the model to within 2%.
+
+---
+
+### Part 2: The Bode Plot — Reading the Motor's Frequency Response
+
+The Bode plot is a standard engineering tool that shows how well the motor tracks
+commands at different speeds of change. There are two panels:
+
+**Magnitude plot (top)** — shows how much of the commanded velocity actually
+appears at the output, expressed in decibels (dB). 0 dB means perfect tracking;
+negative dB means the output is weaker than the command.
+
+**Phase plot (bottom)** — shows how much the output lags behind the command in
+time, expressed in degrees. 0° means no lag; -90° means the output is a quarter
+cycle behind the input.
+
+#### What Our Bode Plot Shows
+
+```
+Low frequencies (slow commands, < 1 rad/s):
+  Magnitude ≈ -13 dB = our gain K expressed logarithmically
+  Phase ≈ 0° — the wheel tracks slow commands faithfully with no lag
+
+Corner frequency at 10 rad/s (= 1/τ = 1/0.1):
+  This is where the motor starts struggling to keep up
+  Magnitude begins rolling off at -20 dB per decade
+  Phase starts dropping toward -45°
+
+High frequencies (fast commands, > 100 rad/s):
+  Magnitude continues dropping — the motor physically cannot follow
+  Phase approaches -90° — the output lags badly behind the command
+```
+
+The key insight is that a first-order system never loses more than 90° of phase,
+no matter how fast the input changes. This makes it **inherently stable** — you
+cannot make it oscillate just by increasing the gain. This is what makes our
+motor-gearbox system relatively straightforward to control.
+
+---
+
+### Part 3: How pidtune() Works — Automatic Gain Calculation
+
+`pidtune()` is MATLAB's automatic PID gain calculator. You hand it the transfer
+function and the type of controller you want, and it returns the optimal gains.
+
+#### What "Optimal" Means Here
+
+`pidtune()` targets a **phase margin of 60°** by default. Phase margin is a
+measure of how far the system is from instability — 0° means it is right on the
+edge of oscillating, 60° means it has a comfortable safety buffer. This is an
+industry standard for robust control: the system will remain stable even if the
+real motor behaves somewhat differently from the model.
+
+#### The Four Controllers Compared
+
+```matlab
+C_p    = pidtune(G, 'P');    % proportional only
+C_pi   = pidtune(G, 'PI');   % proportional + integral
+C_pid  = pidtune(G, 'PID');  % proportional + integral + derivative
+C_fast = pidtune(G, 'PID', opts);  % PID with faster target bandwidth
+```
+
+Results:
+
+| Controller | Kp | Ki | Kd |
+|---|---|---|---|
+| P | 8.9170 | — | — |
+| PI | 4.5508 | 136.57 | — |
+| PID | 6.2497 | 113.28 | 0.0 |
+| PID fast | 7.1885 | 132.09 | 0.0 |
+
+#### Why Kd = 0 Is the Correct Answer
+
+`pidtune()` returned `Kd = 0` for both PID variants. This surprises people who
+expect PID to always use all three terms, but it is mathematically correct here.
+
+The derivative term amplifies high-frequency changes in the error signal. The
+faster the error changes, the larger the derivative output. The problem is that
+encoder velocity readings contain quantisation noise — small random jumps that
+look like very fast changes. A non-zero Kd would amplify this noise directly into
+the motor command, causing jitter and heat.
+
+For our motor with τ = 0.1s, the system is already fast enough that derivative
+action provides no meaningful benefit. `pidtune()` correctly identifies this and
+sets Kd = 0, making this effectively a PI controller. **Trust the maths.**
+
+---
+
+### Part 4: Simulated Performance — Comparing Controllers
+
+To evaluate each controller before touching hardware, we simulated a step command
+— the wheel is asked to jump from 0 to 1 rad/s instantly — and observed how each
+controller responds.
+
+#### What Each Metric Means
+
+**Settling time** — how long until the wheel stays within 2% of the target and
+stays there. A shorter settling time means faster response.
+
+**Overshoot** — how much the wheel exceeds the target before correcting. Expressed
+as a percentage of the target. Some overshoot is normal; too much means the
+controller is aggressive and will cause mechanical stress.
+
+**Steady-state error** — the permanent gap between the target and the actual speed
+after the transient dies out. For a robot wheel, this must be zero — if you command
+5 rad/s and the wheel settles at 4.6 rad/s, your robot will drift.
+
+#### Results
+
+| Controller | Settle | Overshoot | SS Error | Verdict |
+|---|---|---|---|---|
+| P | 2.000 s | 0.0% | 32.87% | ❌ Unusable — permanent 33% error |
+| PI | 0.296 s | 13.8% | 0.00% | ⚠️ Fast but bouncy |
+| PID | 0.317 s | 6.1% | 0.00% | ✅ Best balance |
+| PID fast | 0.292 s | 6.5% | 0.00% | ✅ Slightly faster, slightly bouncier |
+
+**Why P alone fails:** A proportional controller outputs power proportional to
+error. As the wheel approaches the target, the error shrinks, the output shrinks,
+and the two reach equilibrium before zero error is achieved. The 32.87% permanent
+offset is not a bug — it is a fundamental mathematical property of P control on
+this type of plant. The integral term exists specifically to drive this error to
+zero by accumulating error over time and continuously pushing until it disappears.
+
+**Why PID was chosen over PID fast:** The standard PID settles in 317ms with 6.1%
+overshoot. The fast variant settles in 292ms (25ms faster) but with 6.5% overshoot.
+For a wheel velocity controller on a robot, that extra 25ms is not worth the
+additional overshoot which would cause the robot to jerk slightly at every speed
+change.
+
+---
+
+### Part 5: Simulink Validation — The Final Check Before Hardware
+
+Rather than rebuilding the Simulink model from scratch on every run, a permanent
+`motor_pid_simulation_final.slx` model was created and saved. The MATLAB script
+loads this model, injects the gains from `pid_gains.mat`, runs the simulation,
+and reports the results.
+
+#### What the Simulink Model Contains
+
+```
+[Step Setpoint] → [Sum] → [PID Controller] → [Dead Zone] → [Plant G(s)] → [Scope]
+                    ↑                                              |
+                    └──────────────── feedback ───────────────────┘
+```
+
+- **Step Setpoint** — commands the wheel to jump to 10 rad/s at t=0
+- **Sum** — computes the error (setpoint minus actual velocity)
+- **PID Controller** — applies Kp, Ki, Kd to the error
+- **Dead Zone** — models the 30% deadband; any command below ±30% is treated as
+  zero, just as the real hardware behaves
+- **Plant G(s)** — the transfer function representing the motor-encoder system
+- **Feedback loop** — feeds the plant output back to the sum block to close the loop
+
+#### Simulation Results
+
+```
+Rise time:     0.126 s   — wheel reaches 63% of 10 rad/s in 126ms
+Settling time: 0.329 s   — within 2% of 10 rad/s in 329ms
+Overshoot:     3.2%      — wheel briefly hits 10.32 rad/s before settling
+Steady-state:  10.0000   — perfect, zero permanent error
+```
+
+The overshoot in Simulink (3.2%) is lower than in the lsim comparison (6.1%)
+because the Simulink model includes the Dead Zone block. In the early moments of
+a step response the PID output is very large, but the Dead Zone clips the
+lower-end commands during the settling phase, which naturally reduces overshoot.
+The Simulink result is the more realistic prediction of what the real hardware
+will do.
+
+329ms settling time with a 10ms control loop means the PID converges in
+approximately 33 control cycles — fast enough for smooth tracking, stable enough
+not to fight itself.
+
+---
+
+### Part 6: Anti-Windup — A Critical Implementation Requirement
+
+Ki = 113.28 is a large value. This creates a specific risk called **integrator
+windup** that must be addressed in the firmware before the PID is used on hardware.
+
+**What windup means:** The integral term accumulates error over time. If the wheel
+is blocked or stalled, the PID cannot reach the setpoint, so error keeps
+accumulating. With Ki = 113, just one second of stall accumulates 113 units of
+integral output. When the wheel finally frees, this accumulated value causes it to
+lurch violently far past the setpoint.
+
+**The fix — anti-windup clamping:** The integral accumulator must be hard-limited
+to the output range (±100% power). If the output is already saturated, the
+integrator stops accumulating. This is the first feature to implement in the
+PID library tomorrow, before any other functionality.
+
+```cpp
+// Anti-windup: clamp integral accumulator to output limits
+integral += Ki * error * dt;
+integral  = constrain(integral, output_min, output_max);
+```
+
+---
+
+### Final Arduino PID Starting Values
+
+These are the values exported to `pid_gains.mat` and ready to copy directly into
+the PID firmware:
+
+```cpp
+float Kp       = 6.2497;
+float Ki       = 113.2799;
+float Kd       = 0.0000;   // Derivative not needed — PI controller
+float deadband = 30.0;     // % power — from Test 1
+float dt       = 0.010;    // 10ms control interval
+```
+
+---
+
+### Module Status Roadmap
+
+| Module | Files | Status |
+|--------|-------|--------|
+| POST / System Health | `lib/POST/post.cpp` | ✅ Stable |
+| IMU Driver | `lib/IMU/imu.cpp` | ✅ Stable |
+| AS5600 Encoder Driver | `lib/AS5600/as5600.cpp` | ✅ Stable |
+| Motor Driver | `lib/Motor/motor.cpp` | ✅ Stable |
+| MATLAB Open-Loop Suite | `matlab/motor_openloop_test.m` | ✅ Complete |
+| MATLAB Model & Tune | `matlab/motor_model_and_tune.m` | ✅ Complete |
+| Simulink Model | `matlab/motor_pid_simulation_final.slx` | ✅ Complete |
+| PID Controller | `lib/PID/` | 🔄 Next — gains ready |
+| Move Base / EKF | `lib/MoveBase/` | 📋 Planned |
+
+---
+
+### Files Added This Session
+
+```
+matlab/motor_model_and_tune.m                 — Plant identification, pidtune(), simulation
+matlab/motor_pid_simulation_final.slx         — Permanent Simulink closed-loop model
+matlab/CSVs/pid_gains.mat                     — Exported Kp, Ki, Kd, K, τ, deadband
+```
+
+### Key Results Summary
+
+| Parameter | Value | Unit |
+|-----------|-------|------|
+| Transfer function | 0.2291 / (0.1s + 1) | — |
+| Chosen controller | PI (PID with Kd=0) | — |
+| Kp | 6.2497 | — |
+| Ki | 113.2799 | — |
+| Kd | 0.0000 | — |
+| Simulated rise time | 0.126 | s |
+| Simulated settling time | 0.329 | s |
+| Simulated overshoot | 3.2 | % |
+| Steady-state error | 0.0000 | rad/s |
+
+### Next Steps
+
+- [ ] **Implement PID library** — `pid_t` struct with Kp, Ki, Kd, integral
+      accumulator, anti-windup clamping, output saturation, and dt
+- [ ] **Anti-windup first** — with Ki = 113, integrator windup is not optional;
+      implement and test clamping before any closed-loop hardware run
+- [ ] **Closed-loop step test** — command a velocity setpoint over serial,
+      stream actual velocity back to MATLAB, compare against Simulink prediction
+- [ ] **Feedforward integration** — combine PID with deadband-offset feedforward
+      for improved low-speed tracking
+- [ ] **Extend to 4 motors** — replicate motor_t and pid_t for RF, LR, RR
