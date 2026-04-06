@@ -991,6 +991,12 @@ then validated inside a Simulink simulation to confirm the closed-loop behaviour
 before any hardware was touched. This session bridges the open-loop measurements
 from yesterday to the PID firmware implementation tomorrow.
 
+#### Reference Material
+Brian Douglas' *Control System Lectures* playlist on YouTube was used as the
+primary reference for understanding PID implementation theory, discretisation,
+anti-windup, and filtered derivative concepts:
+https://youtube.com/playlist?list=PLn8PRpmsu08pQBgjxYFXSsODEF3Jqmm-y
+
 ---
 
 ### Part 1: What Is a Transfer Function and Why Do We Need One?
