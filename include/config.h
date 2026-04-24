@@ -10,13 +10,19 @@
 const float RAW_TO_RAD = (2.0f * PI) / 4096.0f; 
 // const float RAD_TO_DEG = 57.29577951f;  // Provided by Arduino
 
-// --- PID Gains (Initial Rad/s Estimates) ---
-struct ControlGains {
-    float kp = 36.5f;   
-    float ki = 17.5f;   
-    float kd = 0.45f;   
-    float alpha = 0.25f; // LPF for velocity measurement
-};
+
+
+// PID Tuning Gains (from MATLAB)
+#define PID_KP 10.0f       // 6.2497    6.2497      6      5.0   6.5   5.8  8.5
+#define PID_KI 30.0f     // 113.2799  113.2799    90     80    50    60   15
+#define PID_KD 0.0f          // 0.0       0.15        0.02    0     0.1    0   0
+
+
+
+// PID Constraints
+#define PID_OUT_MIN -100.0f
+#define PID_OUT_MAX  100.0f
+#define MOTOR_DEADBAND 30.0f // Power % where motor starts moving
 
 // --- Physical Limits ---
 const int   PWM_MAX = 255;
@@ -37,6 +43,7 @@ const float DT = 0.020f; // Seconds
 #define I2C_CLOCK     400000 // 400kHz Fast Mode
 #define I2C_CLOCK_STD 100000 // 100kHz Standard Mode
 #define CONTROL_INTERVAL_MS 20 // 50Hz
+#define PID_DT (CONTROL_INTERVAL_MS / 1000.0f) // 0.01s
 
 // --- Hardware Pin Mapping ---
 

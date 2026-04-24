@@ -23,23 +23,35 @@ void motor_init(motor_t *motor, uint8_t pwm, uint8_t in1, uint8_t in2, uint8_t s
 // Set motor power
 void motor_set_speed(motor_t *motor, float power) {
 
-    // Clamp speed
-    if (power > 100.0f) {
-        power = 100.0f;
-    } else if (power < -100.0f) {
-        power = -100.0f;
+    // Deadband Compensation
+    float final_power = power;
+
+    if (power > 0.1f) {
+        final_power = power + MOTOR_DEADBAND;
+    } else if (power < -0.1f) {
+        final_power = power - MOTOR_DEADBAND;
     }
-    motor->current_power = power;
+    else {
+        final_power = 0.0f;
+    }
+    // Clamp speed
+    if (final_power > 100.0f) {
+        final_power = 100.0f;
+    } else if (final_power < -100.0f) {
+        final_power = -100.0f;
+    }
+    motor->current_power = final_power;
 
     // Enable motor
-    digitalWrite(motor->motor_enable_pin, HIGH);
+    digitalWrite(motor->motor_enable_pin, 
+        (fabs(final_power) > 0.1f) ? HIGH : LOW); 
 
     // Set Power based on direction
-    if (power > 0.01){
+    if (final_power > 0.1){
         digitalWrite(motor->motor_pin1, HIGH);
         digitalWrite(motor->motor_pin2, LOW);   
     }
-    else if (power < -0.01){
+    else if (final_power < -0.1){
         digitalWrite(motor->motor_pin1, LOW);
         digitalWrite(motor->motor_pin2, HIGH);
     }
