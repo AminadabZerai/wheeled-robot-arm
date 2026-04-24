@@ -12,10 +12,12 @@ const float RAW_TO_RAD = (2.0f * PI) / 4096.0f;
 
 
 
-// PID Tuning Gains (from MATLAB)
-#define PID_KP 10.0f       // 6.2497    6.2497      6      5.0   6.5   5.8  8.5
-#define PID_KI 30.0f     // 113.2799  113.2799    90     80    50    60   15
-#define PID_KD 0.0f          // 0.0       0.15        0.02    0     0.1    0   0
+// PID Tuning Gains and FEEDFORWARD (from MATLAB)
+#define PID_KP       10.0f
+#define PID_KI       10.0f
+#define PID_KD       0.0f
+#define PID_KFF      4.366f   // 1/K = 1/0.2291
+#define PID_DEADBAND 30.0f    // matches MOTOR_DEADBAND 
 
 
 
@@ -27,7 +29,8 @@ const float RAW_TO_RAD = (2.0f * PI) / 4096.0f;
 // --- Physical Limits ---
 const int   PWM_MAX = 255;
 const int   PWM_MIN = 30;     
-const float VEL_MAX_RAD = 7.0f; // ~400 deg/s
+#define VEL_MIN_RAD      7.0f   // below this deadband dominates
+#define VEL_MAX_RAD     15.0f   // above this output saturates
 
 // --- Device Addresses ---
 const int AS5600_ADDR = 0x36;
@@ -43,7 +46,7 @@ const float DT = 0.020f; // Seconds
 #define I2C_CLOCK     400000 // 400kHz Fast Mode
 #define I2C_CLOCK_STD 100000 // 100kHz Standard Mode
 #define CONTROL_INTERVAL_MS 20 // 50Hz
-#define PID_DT (CONTROL_INTERVAL_MS / 1000.0f) // 0.01s
+#define PID_DT (CONTROL_INTERVAL_MS / 1000.0f) // 0.02s
 
 // --- Hardware Pin Mapping ---
 
