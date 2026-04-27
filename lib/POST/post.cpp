@@ -1,3 +1,57 @@
+/* ============================================================================
+ * post.cpp - Power-On Self-Test (POST) & Hardware Integrity Framework
+ * ============================================================================
+ * Description:
+ * Modular hardware validation framework executed at boot before the robot
+ * enters its control loop. Performs structured I2C bus presence checks,
+ * encoder magnetic health validation, and system integrity reporting.
+ * If any critical check fails, the system halts with an SOS blink pattern
+ * rather than attempting to run with faulty hardware.
+ *
+ * Hardware Target:
+ * - Arduino Nano 33 IoT
+ * - IMU:      LSM6DS3  (I2C @ 0x6A)
+ * - MUX:      TCA9548A (I2C @ 0x70)
+ * - Encoders: AS5600 × 4 (I2C @ 0x36, isolated per MUX channel)
+ * - Bus Speed: 400kHz Fast Mode (set in post_init())
+ *
+ * Design Pattern:
+ * - "Safety First" bootloader — hardware validated before any driver
+ *   initialisation or control loop entry.
+ * - Modular check functions return bool and print pass/fail to Serial,
+ *   allowing granular diagnosis without a logic analyser.
+ * - System halts on failure with specific diagnostic message rather than
+ *   entering an undefined state with faulty sensor data.
+ *
+ * Check Sequence:
+ * 1. post_init()          — configure I2C bus at 400kHz
+ * 2. check_i2c()          — run all hardware checks, return overall health
+ *    ├── post_check_main_bus(IMU)     — verify LSM6DS3 acknowledges on bus
+ *    └── post_as5600_health(CH_LF)   — verify magnet present and signal strong
+ * 3. post_system_report() — print result, halt on failure
+ *
+ * AS5600 Magnetic Health:
+ * - Status register (0x0B) bit 5 (MD) must be 1 — magnet detected.
+ * - AGC register (0x1A) value < 200 — signal strength sufficient.
+ *   AGC near 255 indicates magnet too far or too weak.
+ * - Distinguishes between NO MAGNET and WEAK SIGNAL for faster diagnosis.
+ *
+ * Extension:
+ * - Additional encoder channels (LB, RF, RB) are commented out pending
+ *   4-wheel hardware integration. Uncomment in check_i2c() as each
+ *   encoder is physically installed and verified.
+ *
+ * Dependencies:
+ * - Wire.h
+ * - post.h
+ * - as5600.h  (AS5600_ADDR, AS5600_STATUS_REG, AS5600_GAIN_CONTROL_REG)
+ * - imu.h     (LSM6DS3_ADDR)
+ * - config.h  (MUX_ADDR, MUX_CH_*, I2C_CLOCK)
+ *
+ * Author: Aminadab Z. Ghebrehiwet
+ * Date:   2026-04-02
+ * ============================================================================ */
+
 #include <Arduino.h>
 #include <Wire.h>
 #include "config.h"

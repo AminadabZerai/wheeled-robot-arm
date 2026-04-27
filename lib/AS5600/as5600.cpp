@@ -1,3 +1,45 @@
+/* ============================================================================
+ * as5600.cpp - AS5600 Magnetic Rotary Encoder Hardware Abstraction Layer
+ * ============================================================================
+ * Description:
+ * Procedural driver for the AS5600 12-bit magnetic rotary encoder.
+ * Handles I2C communication through a TCA9548A multiplexer, rollover-safe
+ * cumulative angle tracking across infinite rotations, and real-time
+ * angular velocity derivation for closed-loop PID velocity control.
+ *
+ * Hardware Target:
+ * - Arduino Nano 33 IoT
+ * - Sensor: AS5600 (fixed I2C address 0x36)
+ * - Bus: TCA9548A I2C Multiplexer (0x70) — one encoder per MUX channel
+ * - Bus Speed: 400kHz Fast Mode
+ *
+ * Design Pattern:
+ * - Reentrant procedural interface using (as5600_t *sensor) pointers.
+ * - MUX channel selection encapsulated inside read_regs() — transparent
+ *   to all higher-level code.
+ * - Rollover handling via shortest-path signed 16-bit jump algorithm:
+ *   jumps > +2048 or < -2048 are corrected by ±4096, mapping the
+ *   12-bit circular domain onto a 32-bit linear accumulator (total_ticks).
+ * - delta_radians logged per cycle to avoid downstream floating-point
+ *   differencing errors during offline MATLAB/EKF replay.
+ *
+ * Key Design Decisions:
+ * - buffer[2] zero-initialised in as5600_get_angle() — failed I2C reads
+ *   produce zero-delta rather than garbage position jumps.
+ * - write_reg() retained as a stub for future AS5600_PREFERED_CONFIG
+ *   register write (hysteresis, power mode, slow filter).
+ * - angular_velocity sign is inherent from jump direction — no extra
+ *   direction pin required.
+ *
+ * Dependencies:
+ * - Wire.h
+ * - as5600.h
+ * - config.h (MUX_ADDR, AS5600_ADDR, CONTROL_INTERVAL_MS, RAW_TO_RAD)
+ *
+ * Author: Aminadab Z. Ghebrehiwet
+ * Date:   2026-04-03
+ * ============================================================================ */
+
 #include <Arduino.h>
 #include <Wire.h>
 #include "config.h"

@@ -1,3 +1,51 @@
+/* ============================================================================
+ * motor.cpp - TB6612FNG Motor Driver Hardware Abstraction Layer
+ * ============================================================================
+ * Description:
+ * Procedural driver for brushed DC motors controlled via the TB6612FNG
+ * dual H-bridge motor driver. Handles direction control, PWM generation,
+ * deadband compensation, output clamping, coast, and active braking.
+ * Designed to be driven directly by the PID controller output.
+ *
+ * Hardware Target:
+ * - Arduino Nano 33 IoT
+ * - Driver IC: TB6612FNG (dual H-bridge)
+ * - Control signals: IN1, IN2 (direction), PWM (speed), STBY (enable)
+ * - Power supply: 7.4V 2S LiPo
+ *
+ * Design Pattern:
+ * - Reentrant procedural interface using (motor_t *motor) pointers.
+ * - Power represented as percentage (-100.0 to +100.0) — decouples
+ *   control logic from raw PWM hardware, making PID output human-readable
+ *   and portable across different MCUs or driver ICs.
+ * - PWM conversion (0–255) isolated to the lowest level in motor_set_speed().
+ * - Deadband compensation applied before clamping — ensures final_power
+ *   never exceeds output limits after the offset is added.
+ * - All direction checks and PWM calculation use final_power (post-deadband),
+ *   not the original power argument — prevents erratic behaviour at the
+ *   deadband boundary where direction and magnitude would otherwise mismatch.
+ *
+ * Operating Modes:
+ * - Forward:  IN1=HIGH, IN2=LOW,  PWM > 0
+ * - Reverse:  IN1=LOW,  IN2=HIGH, PWM > 0
+ * - Coast:    IN1=LOW,  IN2=LOW,  any PWM  (motor free-spins)
+ * - Brake:    IN1=HIGH, IN2=HIGH, PWM=255  (short-circuit braking torque)
+ * - Standby:  STBY=LOW (disables entire driver IC, both channels)
+ *
+ * Key Design Decisions:
+ * - is_inverted flag reserved for software direction correction when a
+ *   motor is physically wired backwards — avoids rewiring on assembly.
+ * - STBY pin driven per-command based on final_power magnitude rather
+ *   than a separate enable call — ensures motor is always in the correct
+ *   state regardless of call order.
+ *
+ * Dependencies:
+ * - motor.h
+ * - config.h (MOTOR_DEADBAND)
+ *
+ * Author: Aminadab Z. Ghebrehiwet
+ * Date:   2026-04-04
+ * ============================================================================ */
 #include "motor.h"
 
 // Initialize motor

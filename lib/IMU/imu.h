@@ -1,11 +1,54 @@
 /* ============================================================================
- * imu.h - LSM6DS3 Driver for Arduino Nano 33 IoT
+ * imu.h - LSM6DS3 Inertial Measurement Unit Driver Interface
  * ============================================================================
- * This library provides a procedural C interface to the onboard LSM6DS3 IMU.
- * It handles initialization, raw data retrieval, and gyroscope calibration based on the datasheet
- * * Target: Arduino Nano 33 IoT (LSM6DS3)
- * Logic Voltage: 3.3V
- * Protocol: I2C (Wire)
+ * Exposes the public API for the onboard LSM6DS3 6-axis IMU driver.
+ * Defines device constants, register addresses, sensitivity values,
+ * configuration options, and the data structures and function prototypes
+ * used by main.cpp and any module requiring accelerometer or gyroscope data.
+ *
+ * Target:   Arduino Nano 33 IoT (onboard LSM6DS3)
+ * Protocol: I2C (Wire library), address 0x6A
+ * Voltage:  3.3V logic
+ *
+ * Sensor Capabilities:
+ *   Accelerometer — ±2g / ±4g / ±8g / ±16g selectable full-scale
+ *                   Sensitivity: 0.061 mg/LSB at ±2g
+ *                   Anti-aliasing filter: 50 / 100 / 200 / 400 Hz selectable
+ *   Gyroscope     — ±125 / ±250 / ±500 / ±1000 / ±2000 dps selectable
+ *                   Sensitivity: 0.004375 dps/LSB at ±125 dps
+ *
+ * Register Map (key entries):
+ *   0x0F  WHO_AM_I   — device identity (expected: 0x69)
+ *   0x10  CTRL1_XL   — accelerometer ODR, full-scale, filter config
+ *   0x11  CTRL2_G    — gyroscope ODR and full-scale config
+ *   0x22–0x27        — gyroscope X/Y/Z output (low + high byte pairs)
+ *   0x28–0x2D        — accelerometer X/Y/Z output (low + high byte pairs)
+ *
+ * Calibration:
+ *   Both sensors use a running-average offset scheme over
+ *   CALIBRATION_DATA_SIZE (1000) samples captured while the robot is
+ *   stationary. Accelerometer Z offset corrects for gravity
+ *   (GRAVITY_WHEN_STATIC = 16384 LSB = 1g at ±2g full-scale).
+ *   Calibration offsets are stored in lsm6ds3_t and subtracted at read time.
+ *
+ * Characterisation Results (2026-04-01, stationary, flat surface):
+ *   Accel magnitude: 1.0003 ± 0.0006 g     (ideal = 1.0000 g)
+ *   Gyro bias:       < 0.01 °/s all axes    (ideal = 0)
+ *   Gyro drift:      < 0.63° over 60s       (uncorrected)
+ *   Noise density:   ~0.0001 g/√Hz (accel), ~0.010 (°/s)/√Hz (gyro)
+ *
+ * Usage:
+ *   lsm6ds3_t imu;
+ *   lsm6ds3_init(&imu, LSM6DS3_ADDR);
+ *   lsm6ds3_check_id(&imu);          // verify WHO_AM_I = 0x69
+ *   lsm6ds3_enable_accel(&imu);
+ *   lsm6ds3_enable_gyro(&imu);
+ *   lsm6ds3_calibrate_accel(&imu);   // call repeatedly during stationary window
+ *   lsm6ds3_calibrate_gyro(&imu);
+ *   sensor_data_t accel, gyro;
+ *   lsm6ds3_read_accel(&imu, &accel);
+ *   lsm6ds3_read_gyro(&imu, &gyro);
+ *
  * ============================================================================ */
 
 #ifndef IMU_H
