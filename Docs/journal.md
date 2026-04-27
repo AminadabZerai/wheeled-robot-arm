@@ -1305,3 +1305,468 @@ matlab/CSVs/pid_gains.mat                     — Exported Kp, Ki, Kd, K, τ, de
 - [ ] **Feedforward integration** — combine PID with deadband-offset feedforward
       for improved low-speed tracking
 - [ ] **Extend to 4 motors** — replicate motor_t and pid_t for RF, LR, RR
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+## 2026-04-13 — PID Library Implementation & First Closed-Loop Hardware Tests
+
+### Overview
+Two major threads today: (1) implemented the PID controller library following the
+same component-based pattern as the IMU, encoder, and motor drivers; (2) ran the
+first closed-loop velocity control tests on hardware, discovering and resolving
+three critical bugs that prevented the controller from working. By end of session
+the wheel was tracking velocity setpoints over serial with MATLAB live monitoring.
+
+---
+
+### Part 1: PID Controller Library
+
+#### Architecture
+
+The PID driver follows the same reentrant struct pattern as every other module.
+All state and configuration lives in `pid_ctrl_t`, and functions operate on a
+pointer to it. Declaring `pid_ctrl_t pid_LF` and `pid_ctrl_t pid_RF` with the
+same functions gives four independent controllers without duplicating logic.
+
+```c
+typedef struct {
+    float kp, ki, kd;             // Gains
+    float kff;                    // Feedforward gain
+    float deadband;               // % power offset
+    float output_min, output_max; // Output limits (-100 to 100)
+    float dt;                     // Control interval in seconds
+    float setpoint;               // Target velocity (rad/s)
+    float last_error;             // For derivative term
+    float integral_sum;           // For integral term
+} pid_ctrl_t;
+```
+
+#### Anti-Windup — Clamping Method
+
+The integral accumulator is only updated when the output is within limits. If the
+output saturates, the integrator freezes:
+
+```c
+if (output > pid->output_max)      output = pid->output_max;
+else if (output < pid->output_min) output = pid->output_min;
+else                               pid->integral_sum += error * pid->dt;
+```
+
+This prevents the integrator winding up during stall or saturation — a critical
+requirement given Ki=113 in the initial gains.
+
+#### `pid_init()` calls `pid_reset()`
+
+Rather than duplicating zeroing logic, `pid_init()` calls `pid_reset()` at the
+end to zero all state fields. This ensures the struct is always clean on
+initialisation regardless of memory contents:
+
+```c
+void pid_init(...) {
+    pid->kp = kp; pid->ki = ki; // assign all config...
+    pid_reset(pid);              // zero all state
+}
+```
+
+---
+
+### Part 2: Critical Bugs Found and Fixed
+
+#### Bug 1 — Missing `dt` in Integral Accumulation
+
+The most damaging bug. The integral was implemented as:
+
+```c
+pid->integral_sum += error;          // WRONG
+i_term = pid->ki * pid->integral_sum;
+```
+
+With Ki=113.28 and a 10 rad/s setpoint, after the first cycle:
+- `integral_sum = 10` (first error value)
+- `i_term = 113.28 × 10 = 1132%` — 11x over the output limit
+
+The motor clamped to 100% instantly and stayed there. The fix:
+
+```c
+pid->integral_sum += error * pid->dt;  // CORRECT
+```
+
+Now with dt=0.02: `i_term = 113.28 × 0.1 = 11.3%` per second — completely sane.
+
+#### Bug 2 — `motor_set_speed()` Using Wrong Variable
+
+After applying the deadband offset to create `final_power`, all subsequent
+direction checks and PWM calculation still used the original `power` variable:
+
+```cpp
+float final_power = power + MOTOR_DEADBAND;  // computed correctly
+if (power > 0.1) { ... }                     // but direction used 'power' ❌
+uint8_t pwm = map(fabs(power), ...);         // PWM also used 'power' ❌
+```
+
+Direction was being set from the pre-deadband value while PWM was driven from
+the post-deadband value — causing erratic behaviour near the deadband boundary.
+All checks changed to use `final_power`.
+
+#### Bug 3 — Motor Running Before Any Command
+
+Arduino enters `loop()` immediately after calibration. With setpoint=0 and
+encoder noise producing non-zero `current_velocity`, the error was non-zero and
+the motor started spinning before MATLAB connected. Fixed with a gate flag:
+
+```cpp
+bool setpoint_received = false;
+
+// Gate: motor only runs after first command arrives
+if (setpoint_received) {
+    float target_power = pid_compute(&pid_LF, current_velocity);
+    motor_set_speed(&motor_LF, target_power);
+} else {
+    motor_set_speed(&motor_LF, 0.0f);
+}
+```
+
+---
+
+### Part 3: Serial Protocol Upgrade
+
+The serial interface was upgraded from raw float commands to a structured
+prefix protocol, allowing MATLAB to change gains live without reflashing:
+
+```
+S:<float>  — set velocity setpoint (rad/s), opens gate
+P:<float>  — update Kp, resets integral
+I:<float>  — update Ki, resets integral
+D:<float>  — update Kd, resets integral
+F:<float>  — update Kff, resets integral
+R:         — full reset, stop motor, close gate
+```
+
+Telemetry expanded from 4 to 7 columns:
+```
+Time_ms, Setpoint, Velocity, Power, Kp, Ki, Kd
+```
+
+Active gains are echoed every cycle so MATLAB can verify commands were received
+before logging a segment — this eliminates contamination from transition windows
+where old gains are still active.
+
+---
+
+### Part 4: MATLAB Live Monitor
+
+`matlab_live_pid_monitor.m` was rebuilt with a non-blocking UI. The previous
+version used `input()` for setpoint entry which blocked the serial loop and
+caused Arduino to disconnect every time the user typed. The fix uses a figure
+text box and Send button — the serial loop never pauses.
+
+Additional features added:
+- **Stop button** — sends `R:` then `S:0.00`
+- **Sequence runner** — enter `7,10,13,15` and a hold time; steps through
+  setpoints automatically with `pause()` between them
+- **Dark mode palette** — blue velocity, amber setpoint, green power, dark axes
+- **7-column storage** — buffer now captures Kp, Ki, Kd alongside telemetry
+- **CSV save on any exit** — figure close, Ctrl+C, or runtime error
+
+---
+
+### Module Status Roadmap
+
+| Module | Files | Status |
+|--------|-------|--------|
+| POST / System Health | `lib/POST/post.cpp` | ✅ Stable |
+| IMU Driver | `lib/IMU/imu.cpp` | ✅ Stable |
+| AS5600 Encoder Driver | `lib/AS5600/as5600.cpp` | ✅ Stable |
+| Motor Driver | `lib/Motor/motor.cpp` | ✅ Stable |
+| PID Controller | `lib/PID/pid_controller.c` | ✅ Complete |
+| MATLAB Live Monitor | `matlab/matlab_live_pid_monitor.m` | ✅ Complete |
+| 4-Wheel Integration | `src/main.cpp` | 📋 Next |
+
+### Next Steps
+
+- [ ] **Run automated gain sweep** — MATLAB commands gains over serial,
+      logs response per combination, ranks by composite score
+- [ ] **Add feedforward** — baseline power from setpoint directly to
+      reduce integrator load and improve low-speed tracking
+- [ ] **Multi-setpoint validation** — confirm gains hold across 7–15 rad/s
+- [ ] **Extend to 4 motors** — replicate motor_t and pid_t for RF, LR, RR
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+## 2026-04-24 — Automated PID Sweep, Feedforward Integration & Final Tuning
+
+### Overview
+Three major threads today: (1) built and ran an automated MATLAB gain sweep to
+identify optimal PID values empirically from real hardware data; (2) implemented
+and debugged a feedforward term that reduced settling time by 14x; (3) ran a full
+multi-setpoint validation confirming the controller works cleanly across the entire
+7–15 rad/s operating range. Single-wheel closed-loop velocity control is complete.
+
+---
+
+### Part 1: Why the MATLAB Model Gains Failed on Hardware
+
+The gains computed by `pidtune()` on 2026-04-05 were `Kp=6.25, Ki=113.28`.
+Seven hardware sessions with these gains all produced violent oscillation between
+±23 rad/s — the wheel never settled. Two root causes were identified:
+
+**Root cause 1 — Missing `dt` in integral accumulation (described in previous
+entry).** With `integral_sum += error` instead of `integral_sum += error * dt`,
+Ki=113 accumulated error 50x faster than the model assumed.
+
+**Root cause 2 — Deadband compensation changes the effective plant gain.** The
+linear model `G(s) = 0.2291 / (0.1s + 1)` was identified from open-loop data
+where `motor_set_speed()` received raw power percentages. In closed-loop,
+`motor_set_speed()` adds 30% to every non-zero output. This shifts the effective
+plant gain significantly — a PID output of 10% becomes 40% at the motor, making
+the real loop gain ~4x higher than the model assumed. Ki=113 on this modified
+plant caused the oscillation the model said would never happen.
+
+**The lesson:** Model-derived gains are starting points. Any unmodelled nonlinearity
+in the real plant — deadband, friction, saturation — changes the effective loop
+gain and requires empirical correction.
+
+---
+
+### Part 2: Automated Gain Sweep — Finding the Real Working Gains
+
+Rather than manually reflashing for each gain combination, MATLAB was extended to
+send gains over serial using the `P:/I:/D:` command protocol. The sweep script
+tests every combination in a grid, logs the response, computes metrics, ranks
+results, and saves everything to CSV automatically.
+
+#### Sweep 1 — Ki range 0.5 to 5.0 (no feedforward)
+
+Initial hypothesis: Ki must be much lower than 113. First sweep used
+`Kp=[4,6,8,10]` and `Ki=[0.5,1,2,5]`.
+
+**Result: All combinations showed zero overshoot and zero oscillation — but also
+zero settling.** Every combination was still ramping at the end of the 5-second
+window. The integrator was so weak it could not accumulate enough output to
+overcome the deadband and reach steady state. Ki=5 was the lowest value that
+showed any sign of settling.
+
+**Insight:** With the correct `error * dt` formulation, one second of 5 rad/s
+error accumulates `5 × 0.02 × 50 = 5` in the integrator. With Ki=5 that is only
+25% power after one second — still not enough to hold 10 rad/s which needs ~74%.
+The integrator needs more time or higher Ki.
+
+#### Sweep 2 — Ki range 5 to 30 (no feedforward)
+
+Second sweep: `Kp=[6,8,10,12]`, `Ki=[5,10,20,30]`, `SETTLE_WINDOW=10s`.
+
+**Winner: Kp=10, Ki=30** — 0.84s settling, 8.9% overshoot, 0.1% SS error.
+
+This was a genuine step change. Ki=30 accumulated enough integral action within
+the window to drive the output to steady state without oscillating. The settling
+time bar chart showed Kp=10, Ki=30 at 0.84s while every other combination was
+still above 3s.
+
+#### Multi-setpoint validation without feedforward
+
+Tested Kp=10, Ki=30 at 5, 10, 15, 20 rad/s:
+- 5 rad/s: settled at 3.14s, 19.6% overshoot — deadband dominates at low speed
+- 10 rad/s: settled at 0.56s, 10.5% overshoot — good
+- 15 rad/s: settled at 5.80s — approaching saturation
+- 20 rad/s: never settled — physically beyond motor capability at 7.4V
+
+Operating range without feedforward: **8–15 rad/s**.
+
+---
+
+### Part 3: Feedforward — What It Is and Why It Helps
+
+#### The Problem with Pure PI Control
+
+A PI controller starts from zero output and climbs toward the required level
+purely through error accumulation. At 10 rad/s the motor needs ~74% power. The
+integral must build from 0% to 74% before the wheel reaches target speed. During
+this ramp the wheel is below setpoint, the error is large, and the integral keeps
+growing — causing overshoot when it finally arrives.
+
+#### The Feedforward Solution
+
+Feedforward computes the expected power needed to reach the setpoint directly
+from the plant inverse, bypassing the integrator entirely for the steady-state
+component:
+
+```
+ff_term = sign(setpoint) × Kff × |setpoint|
+Kff = 1/K = 1/0.2291 = 4.366
+```
+
+At setpoint = 10 rad/s: `ff_term = 4.366 × 10 = 43.66%`
+
+`motor_set_speed()` then adds the 30% deadband offset: `43.66 + 30 = 73.66%` —
+exactly the power the motor needs. The integrator only corrects the small residual
+error caused by friction, load variations, and encoder noise.
+
+The total PID+FF output:
+
+```
+output = ff_term + Kp×error + Ki×integral_sum + Kd×d_error/dt
+```
+
+#### The Double Deadband Bug
+
+First implementation of feedforward included the deadband inside the ff_term:
+
+```c
+ff_term = pid->deadband + pid->kff * pid->setpoint;  // WRONG
+```
+
+`motor_set_speed()` then added another 30%:
+```
+total = (30 + 43.66) + 30 = 103.66% → clamped to 100%
+```
+
+The motor was commanded to 100% from cycle 1 of every test — causing 22–44%
+overshoot across every gain combination regardless of Kp or Ki. The fix removes
+deadband from `pid_compute()` entirely:
+
+```c
+// CORRECT — motor_set_speed() handles deadband
+ff_term = sign * pid->kff * fabsf(pid->setpoint);
+```
+
+This also fixes reverse direction — at -10 rad/s: `ff_term = -43.66%`, then
+`motor_set_speed()` subtracts 30%: `final = -73.66%`. Correct.
+
+#### Sweep 3 — With Corrected Feedforward
+
+Grid: `Kp=[4,6,8,10]`, `Ki=[2,5,10,15]`, `Kff=4.366` fixed.
+
+**Results were dramatically better across the board:**
+
+| Rank | Kp | Ki | Overshoot | Settling | SS Error |
+|---|---|---|---|---|---|
+| 1 | 10.0 | 5.0 | 8.2% | 0.14s | 0.06% |
+| 2 | 10.0 | 10.0 | 8.2% | 0.06s | 0.11% |
+| 3 | 8.0 | 5.0 | 8.2% | 0.06s | 0.29% |
+
+The 8.2% overshoot floor is the physical step response of the motor — it cannot
+be reduced by gain tuning alone without a filtered derivative or a slower setpoint
+ramp. The feedforward eliminated the need for Ki to carry the steady-state load,
+so Ki could drop from 30 to 10 while settling improved from 0.84s to 0.06s.
+
+**Chosen: Kp=10, Ki=10** — same overshoot as Ki=5, settling twice as fast
+(0.06s vs 0.14s), negligible SS error difference (0.11% vs 0.06%).
+
+---
+
+### Part 4: Final Multi-Setpoint Validation
+
+Tested Kp=10, Ki=10, Kff=4.366 at 7, 10, 13, 15 rad/s:
+
+| Setpoint | SS Vel | SS Error | Overshoot | Settling | Power Range |
+|---|---|---|---|---|---|
+| 7 rad/s | 6.995 | 0.07% | 14.0% | 0.42s | [58, 100]% |
+| 10 rad/s | 9.829 | 1.71% | 8.9% | **0.04s** | [73, 93]% |
+| 13 rad/s | 12.874 | 0.97% | 10.3% | **0.04s** | [84, 100]% |
+| 15 rad/s | 15.002 | 0.02% | 11.5% | 1.64s | [89, 100]% |
+
+Every setpoint settled. Every setpoint under 2% SS error. Every setpoint under
+15% overshoot. The power range at 10 rad/s [73, 93]% confirms the controller
+has full authority in both directions — it never hits 100% saturation, meaning
+it can always increase or decrease output to correct error.
+
+**Feedforward vs no feedforward at 10 rad/s:**
+
+| Metric | No FF | With FF | Improvement |
+|---|---|---|---|
+| Settling | 0.56s | 0.04s | 14x faster |
+| Overshoot | 10.5% | 8.9% | Lower |
+| SS Error | 0.10% | 1.71% | Marginal change |
+
+---
+
+### Part 5: Composite Scoring — How the Sweep Ranks Results
+
+Each combination is scored as a weighted sum of normalised metrics:
+
+```
+score = 0.4 × (overshoot / max_overshoot)
+      + 0.4 × (settling  / max_settling)
+      + 0.2 × (ss_error  / max_ss_error)
+```
+
+Lower score is better. Settling and overshoot are weighted equally at 40% each
+because both matter for robot motion quality. SS error gets 20% because the
+integrator always drives it to near-zero given enough time. The normalisation
+ensures no single metric dominates due to scale differences.
+
+---
+
+### Tuning History Summary
+
+| Session | Gains | Result |
+|---|---|---|
+| Sessions 1–7 | Kp=6.25, Ki=113 | Violent oscillation ±23 rad/s |
+| Sessions 8–9 | dt fixed, Ki=30 | OS=8.9%, Settle=0.84s ✅ |
+| Session 10 | FF added (double deadband bug) | OS=22–44% ❌ |
+| Session 11 | FF corrected | OS=8.2%, Settle=0.06s ✅ |
+| Validation | Multi-setpoint 7–15 rad/s | All settled, all under 2% SSErr ✅ |
+
+---
+
+### Final Production Gains
+
+```cpp
+#define PID_KP       10.0f
+#define PID_KI       10.0f
+#define PID_KD       0.0f
+#define PID_KFF      4.366f  // 1/K = 1/0.2291
+#define PID_DEADBAND 30.0f
+#define VEL_MIN_RAD   7.0f   // below this deadband dominates
+#define VEL_MAX_RAD  15.0f   // above this output saturates at 7.4V
+```
+
+---
+
+### Module Status Roadmap
+
+| Module | Files | Status |
+|--------|-------|--------|
+| POST / System Health | `lib/POST/post.cpp` | ✅ Stable |
+| IMU Driver | `lib/IMU/imu.cpp` | ✅ Stable |
+| AS5600 Encoder Driver | `lib/AS5600/as5600.cpp` | ✅ Stable |
+| Motor Driver | `lib/Motor/motor.cpp` | ✅ Stable |
+| PID Controller | `lib/PID/pid_controller.c` | ✅ Complete |
+| MATLAB Sweep | `matlab/pid_autotune_sweep_ff.m` | ✅ Complete |
+| MATLAB Live Monitor | `matlab/matlab_live_pid_monitor.m` | ✅ Complete |
+| 4-Wheel Integration | `src/main.cpp` | 🔄 Next |
+| Mecanum Kinematics | `lib/MoveBase/` | 📋 Planned |
+| EKF Localisation | `lib/EKF/` | 📋 Planned |
+
+---
+
+### Files Added or Modified This Session
+
+```
+lib/PID/pid_controller.c              — Feedforward term added and corrected
+lib/PID/pid_controller.h              — deadband field added to struct
+src/main.cpp                          — S:/P:/I:/D:/F:/R: command protocol
+                                        7-column telemetry with active gains
+config.h                              — Final gains: Kp=10 Ki=10 Kff=4.366
+matlab/pid_autotune_sweep_ff.m        — Feedforward-aware sweep script
+matlab/matlab_live_pid_monitor.m      — Dark mode, sequence runner, 7-col stream
+matlab/CSVs/pid_ff_sweep_summary_*   — Sweep summary tables
+matlab/CSVs/pid_response_*           — Validation session recordings
+```
+
+### Next Steps
+
+- [ ] **4-wheel integration** — replicate motor_t and pid_t for RF, LR, RR;
+      wire up all four encoders through MUX channels 0–3
+- [ ] **Mecanum forward kinematics** — compute vx, vy, ω from four wheel
+      velocities using the 4×3 mixing matrix
+- [ ] **Body-level velocity commands** — MATLAB sends vx/vy/ω, Arduino
+      inverts kinematics to per-wheel setpoints, PID tracks each wheel
+- [ ] **IMU vibration test under motor load** — characterise noise floor
+      increase relative to stationary baseline from 2026-04-01
+- [ ] **EKF localisation** — fuse encoder odometry with IMU gyroscope for
+      robust heading estimation robust to mecanum wheel slip
+
